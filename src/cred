@@ -1,0 +1,524 @@
+#!/bin/bash
+
+print_confirmation() {
+	local text="$1"
+	echo -ne "$text"
+}
+
+confirm_exit() {
+	if [[ $unsaved_changes -eq 1 ]]; then
+
+		echo -e "\n\e[93mExiting without saving (changes existed)...\e[0m"
+		exit 1
+	else
+		echo -e "\e[92mExiting (no changes had been made)...\e[0m"
+		exit 0
+	fi
+
+}
+confirm_exit_wrap() {
+	# add a newline after the ^C
+	echo "^C"
+	confirm_exit
+	stty sane # Reset terminal state to ensure proper input handling
+}
+# Set the trap for SIGINT (CTRL+C)
+trap "confirm_exit_wrap" SIGINT
+
+# Encrypt data function
+encrypt_data() {
+	local data="$1"
+	local password="$2"
+	local iterations="$3"
+	echo -n "$data" | openssl enc -aes-256-cbc -pbkdf2 -iter "$iterations" -salt -pass pass:"$password" | base64 -w 0
+}
+
+# Decrypt data function
+decrypt_data() {
+	local data="$1"
+	local password="$2"
+	local iterations="$3"
+	echo -n "$data" | base64 -d | openssl enc -d -aes-256-cbc -pbkdf2 -iter "$iterations" -pass pass:"$password" 2>&1
+}
+
+# Generate metadata for the vault file
+generate_metadata() {
+	local encrypted_data="$1"
+	local iterations="$2"
+	local timestamp
+	timestamp=$(date +"%Y-%m-%d %H:%M:%S")
+
+	echo "number-of-iterations $iterations" >"$data_file"
+	echo "last-modified $timestamp" >>"$data_file"
+	echo "encrypted-data $encrypted_data" >>"$data_file"
+}
+
+# Extract key(s) function
+extract_keys() {
+	local keys="$1"
+	local missing_keys=()
+	local found=0
+
+	for key in $keys; do
+		if [[ -n "${kv_store[$key]}" ]]; then
+			echo "${kv_store[$key]}"
+			found=1
+		else
+			missing_keys+=("$key")
+		fi
+	done
+
+	# Report missing keys if any
+	if [[ ${#missing_keys[@]} -gt 0 ]]; then
+		echo "Missing keys: ${missing_keys[*]}"
+	fi
+
+	# Exit with an error if no keys were found
+	if [[ $found -eq 0 ]]; then
+		echo "Error: No keys found."
+		exit 1
+	fi
+}
+
+# Parse metadata from the vault file
+parse_metadata() {
+	local file="$1"
+	declare -A metadata
+	while read -r key value; do
+		metadata["$key"]="$value"
+	done <"$file"
+	echo $(declare -p metadata)
+}
+
+# Main function
+main() {
+	local data_file=""
+	local extract_key=""
+	local create_new=0
+	local iterations="10000" # Default iterations
+	declare -A kv_store
+	local encrypted_data=""
+	local password=""
+	local metadata
+	local unsaved_changes=0
+	local last_confirmation
+
+	# Argument parsing loop
+	while [[ "$1" ]]; do
+		case "$1" in
+		-e)
+			shift
+			if [[ "$1" && "$1" != -* ]]; then
+				extract_key="$1"
+				shift
+			else
+				echo "Error: No keys specified for extraction after '-e'."
+				exit 1
+			fi
+			;;
+		-h)
+			echo "Usage: ./cred [-e key] [-n] <vaultfile>"
+			echo
+			echo "Options:"
+			echo "  -e key      Extract the value of the specified key. \"key1 key2 ...\" for multiple keys."
+			echo "  -n          Create a new vault file."
+			echo "  -h          Display this help message."
+			echo
+			echo "Examples:"
+			echo "  # Open the vault interactively:"
+			echo "  ./cred my-vault"
+			echo
+			echo "  # Extract the value of a key:"
+			echo "  ./cred -e key1 my-vault"
+			echo
+			echo "  # Pipe a password and extract a key:"
+			echo "  echo \"mypassword\" | ./cred -e key1 my-vault"
+			echo
+			echo "  # Create a new vault:"
+			echo "  ./cred -n my-vault"
+			exit 0
+			;;
+		-n)
+			create_new=1
+			shift
+			;;
+		-*)
+			echo "Error: Unknown option '$1'."
+			exit 1
+			;;
+		*)
+			if [[ -z "$data_file" ]]; then
+				data_file="$1"
+			else
+				echo "Error: Multiple data files specified: '$data_file' and '$1'."
+				exit 1
+			fi
+			shift
+			;;
+		esac
+	done
+
+	if [[ -z "$data_file" && "$create_new" -eq 0 ]]; then
+		echo "Error: No data file specified and '-n' (create new) option not set."
+		echo "Usage: $0 [-e key] [-n] <data_file>"
+		exit 1
+	fi
+
+	# Handle the `-e` logic after parsing
+	if [[ -n "$extract_key" ]]; then
+		if [[ -z "$data_file" ]]; then
+			echo "Error: No data file specified."
+			exit 1
+		fi
+
+		# Read the password
+		if read -t 0; then
+			read -rs password
+		else
+			read -rsp "Enter password for $data_file: " password
+			echo
+		fi
+
+		# Parse metadata
+		metadata=$(parse_metadata "$data_file")
+		eval "declare -A metadata=${metadata#*=}"
+
+		# Extract encrypted data and iterations
+		encrypted_data="${metadata['encrypted-data']}"
+		iterations="${metadata['number-of-iterations']}"
+
+		# Decrypt the data
+		decrypted_data=$(decrypt_data "$encrypted_data" "$password" "$iterations")
+		if [[ "$decrypted_data" == *"bad decrypt"* ]]; then
+			echo "Error decrypting data. Incorrect password or corrupted file."
+			exit 1
+		fi
+
+		# Load data into the associative array
+		declare -A kv_store
+		while IFS= read -r key && IFS= read -r value; do
+			decoded_value=$(echo -n "$value" | base64 -d)
+			kv_store["$key"]="$decoded_value"
+		done <<<"$decrypted_data"
+
+		# Call the extract_keys function with the loaded kv_store
+		extract_keys "$extract_key"
+		exit 0
+	fi
+
+	if [[ $create_new -eq 1 ]]; then
+		if [[ -z "$data_file" ]]; then
+			echo "Please specify a file name for the new vault."
+			exit 1
+		fi
+		if [[ -f "$data_file" ]]; then
+			echo "Error: File '$data_file' already exists. Choose a different name or delete the existing file."
+			exit 1
+		fi
+
+		# Prompt for password twice to confirm
+		while true; do
+			read -rsp "Enter password for new vault: " password
+			echo
+			read -rsp "Confirm password: " confirm_password
+			echo
+
+			if [[ "$password" == "$confirm_password" ]]; then
+				# Passwords match
+				break
+			else
+				echo "Error: Passwords do not match. Please try again."
+			fi
+		done
+
+		# Initialize encrypted-data with an empty base64 string
+		encrypted_data=$(echo -n "" | base64 -w 0)
+		generate_metadata "$encrypted_data" "$iterations"
+		last_confirmation=$'\e[92mNew vault created: '"$data_file"$'\e[0m'
+	elif [[ -f "$data_file" ]]; then
+		# Prompt for password
+		if read -t 0; then
+			read -rs password
+			# Redirect stdin to /dev/tty to ensure further inputs are from the terminal
+			exec </dev/tty
+		else
+			read -rsp "Enter password for $data_file: " password
+			echo
+		fi
+
+		# Parse metadata
+		metadata=$(parse_metadata "$data_file")
+		eval "declare -A metadata=${metadata#*=}"
+
+		# Extract encrypted data and iterations
+		encrypted_data="${metadata['encrypted-data']}"
+		iterations="${metadata['number-of-iterations']}"
+
+		# Decrypt the data
+		decrypted_data=$(decrypt_data "$encrypted_data" "$password" "$iterations")
+
+		if [[ "$decrypted_data" == *"bad decrypt"* ]]; then
+			echo "Error decrypting data. Incorrect password or corrupted file."
+			exit 1
+		fi
+
+		# Load data into the associative array
+		while IFS= read -r key && IFS= read -r value; do
+			# Decode the base64-encoded value
+			decoded_value=$(echo -n "$value" | base64 -d)
+
+			# Store the key and decoded value in kv_store
+			kv_store["$key"]="$decoded_value"
+		done <<<"$decrypted_data"
+
+	else
+		echo "No file found. Use -n to create a new vault."
+		exit 1
+	fi
+	while true; do
+		# Check if last_confirmation is set
+		if [[ -n "$last_confirmation" ]]; then
+			# Process last_confirmation with the function and update it
+			last_confirmation=$(print_confirmation "$last_confirmation")
+		else
+			# Set it to an empty string
+			last_confirmation=""
+		fi
+
+		if [[ -n "$last_confirmation" ]]; then
+			echo -ne $last_confirmation
+			echo
+			last_confirmation=""
+		fi
+
+		echo -ne $'\e[96m> \e[0m'
+		#		echo -ne $'Commands to manage vault:\n (s) set key\n (u) unset key\n (v) view keys\n (e) edit key\'s value\n (r) rename key\n (w) write vault to disk\n (i) iterations ['"$iterations"'] change\n (p) password change\n (q) quit\n> '
+		read -n 1 -s command
+		echo -n $command
+		echo # Move to the next line after user input
+		case "$command" in
+		h)
+			echo -ne $'     Commands to manage vault\n\e[90m──────────────────────────────────\e[0m\n \e[35m(\e[0m\e[97ms\e[0m\e[35m)\e[0m set key\n \e[35m(\e[0m\e[97mu\e[0m\e[35m)\e[0m unset key\n \e[35m(\e[0m\e[97mv\e[0m\e[35m)\e[0m view keys\n \e[35m(\e[0m\e[97me\e[0m\e[35m)\e[0m edit key\'s value\n \e[35m(\e[0m\e[97mr\e[0m\e[35m)\e[0m rename key\n \e[35m(\e[0m\e[97my\e[0m\e[35m)\e[0m yank key to clipboard\n\e[90m──────────────────────────────────\e[0m\n \e[35m(\e[0m\e[97mi\e[0m\e[35m)\e[0m iterations ['"$iterations"'] change\n \e[35m(\e[0m\e[97mp\e[0m\e[35m)\e[0m password change\n\e[90m──────────────────────────────────\e[0m\n \e[35m(\e[0m\e[97mw\e[0m\e[35m)\e[0m write vault to disk\n \e[35m(\e[0m\e[97mq\e[0m\e[35m)\e[0m quit\n\e[90m──────────────────────────────────\e[0m\n'
+			;;
+		s)
+			echo -e $'\e[95mSet Key\e[0m'
+			# Prompt for key
+			read -rp $'\e[96mEnter key: \e[0m' key
+
+			# Validate the key
+			if [[ -z "$key" ]]; then
+				last_confirmation="Error: Key cannot be empty."
+				continue
+			elif [[ ! "$key" =~ ^[a-zA-Z0-9:._-]+$ ]]; then
+
+				last_confirmation="Error: Key contains illegal characters. Only letters, numbers, dots, dashes, colon, and underscores are allowed."
+				continue
+			fi
+
+			# Prompt for value
+			read -rp $'\e[93mEnter value: \e[0m' value
+
+			# Store the key-value pair
+			kv_store["$key"]="$value"
+			unsaved_changes=1
+			last_confirmation=$'\e[92mKey \''"$key"$'\' and value set.\e[0m'
+			;;
+		u)
+			echo -e $'\e[95mUnset Key\e[0m'
+			read -rp $'\e[96mEnter key to delete: \e[0m' key
+
+			if [[ -z "$key" ]]; then
+				echo "Error: Key cannot be empty."
+			elif [[ -n "${kv_store[$key]}" ]]; then
+				unset kv_store["$key"]
+				unsaved_changes=1
+				last_confirmation=$'\e[92mKey \''"$key"$'\' and value unset.\e[0m'
+			else
+				last_confirmation="Error: Key \$key\' does not exist."
+			fi
+
+			;;
+		e) # New 'edit' option for editing a key-value pair
+			echo -e $'\e[95mEdit Key Value\e[0m'
+			# Prompt for key to edit
+			read -rp $'\e[96mEnter key to edit: \e[0m' key
+
+			if [[ -z "$key" ]]; then
+				last_confirmation="Error: Key cannot be empty."
+				continue
+			elif [[ -z "${kv_store[$key]}" ]]; then
+				last_confirmation="Error: Key '$key' does not exist."
+				continue
+			fi
+
+			# Get current value of the key
+			current_value="${kv_store[$key]}"
+
+			# Pipe current value to 'micro' and allow the user to edit it
+			edited_value=$(echo -n "$current_value" | micro)
+
+			# If the value was edited, update it in kv_store
+			if [[ "$edited_value" != "$current_value" ]]; then
+				kv_store["$key"]="$edited_value"
+				unsaved_changes=1
+				last_confirmation=$'\e[92mKey \''"$key"$'\' value updated.\e[0m'
+			else
+				last_confirmation=$'\e[93mNo changes made to key \''"$key"$'\'.\e[0m'
+			fi
+			;;
+		v)
+			echo -e $'\e[95mView Keys\e[0m'
+			# Print header and keys, then pipe everything to less
+			{
+				echo -e "ALL KEYS\n--------"
+				for k in "${!kv_store[@]}"; do
+					echo "$k: ${kv_store[$k]}"
+				done
+			} | less
+			;;
+
+			#		v)
+			#			echo -e $'\e[95mView Keys\e[0m'
+			#			read -rp $'\e[96mEnter key to show (leave empty for all): \e[0m' key
+			#			if [[ -z "$key" ]]; then
+			#				# View all keys, pipe to less
+			#				for k in "${!kv_store[@]}"; do
+			#					echo "$k: ${kv_store[$k]}"
+			#				done | less
+			#			else
+			#				# View specific key, pipe to less
+			#				if [[ -n "${kv_store[$key]}" ]]; then
+			#					echo "$key: ${kv_store[$key]}" | less
+			#				else
+			#					echo "Key '$key' not found." | less
+			#				fi
+			#			fi
+			#			;;
+		y)
+			echo -e $'\e[95mYank Key to Clipboard\e[0m'
+			read -rp $'\e[96mEnter key to yank: \e[0m' key
+			if [[ -n "${kv_store[$key]}" ]]; then
+				# Copy the value of the specified key to the clipboard using xsel
+				echo -n "${kv_store[$key]}" | xsel --clipboard --input
+				last_confirmation=$'\e[92mKey \''"$key"$'\' value copied to clipboard.\e[0m'
+			else
+				last_confirmation="Error: Key '$key' not found."
+			fi
+			;;
+		r) # New 'rename' option for renaming a key
+			echo -e $'\e[95mRename Key\e[0m'
+
+			# Prompt for the current (target) key to rename
+			read -rp $'\e[96mEnter the key to rename: \e[0m' old_key
+
+			# Check if the old key exists
+			if [[ -z "$old_key" ]]; then
+				last_confirmation="Error: Key cannot be empty."
+				continue
+			elif [[ -z "${kv_store[$old_key]}" ]]; then
+				last_confirmation="Error: Key '$old_key' does not exist."
+				continue
+			fi
+
+			# Prompt for the new key name
+			read -rp $'\e[96mEnter new name for the key: \e[0m' new_key
+
+			# Validate the new key name
+			if [[ -z "$new_key" ]]; then
+				last_confirmation="Error: New key name cannot be empty."
+				continue
+			elif [[ ! "$new_key" =~ ^[a-zA-Z0-9:._-]+$ ]]; then
+				last_confirmation="Error: New key name contains illegal characters. Only letters, numbers, dots, dashes, colon, and underscores are allowed."
+				continue
+			fi
+
+			# Check if the new key already exists
+			if [[ -n "${kv_store[$new_key]}" ]]; then
+				last_confirmatoin="Error: Key '$new_key' already exists. Please choose a different name."
+				continue
+			fi
+
+			# Rename the key by creating a new key-value pair and removing the old one
+			kv_store["$new_key"]="${kv_store[$old_key]}"
+			unset kv_store["$old_key"]
+			unsaved_changes=1
+			last_confirmation=$'\e[92mKey \''"$old_key"$'\'renamed successfully to \''"$new_key"$'\'.\e[0m'
+			;;
+		w)
+			#echo -e $'\e[95mWrite Vault to Disk\e[0m'
+			# Combine all key-value pairs into a single string using actual newlines
+			combined_data=""
+			for k in "${!kv_store[@]}"; do
+				# Append the key as-is
+				combined_data+="$k"$'\n'
+
+				# Base64-encode the value and append it
+				encoded_value=$(echo -n "${kv_store[$k]}" | base64 -w 0)
+				combined_data+="$encoded_value"$'\n'
+			done
+
+			# Encrypt the combined string
+			encrypted_data=$(encrypt_data "$combined_data" "$password" "$iterations")
+			generate_metadata "$encrypted_data" "$iterations"
+			unsaved_changes=0
+			last_confirmation=$'\e[92mData saved successfully.\e[0m'
+			;;
+		q)
+			if [[ $unsaved_changes -eq 1 ]]; then
+				echo -e "\e[93m⚠️ You have unwritten changes.\e[0m"
+				echo -ne "\e[96mAre you sure you want to exit without saving? (y/N): \e[0m"
+
+				read -n 1 -s response
+				echo -n "$response"
+				echo
+				case "$response" in
+				[yY][eE][sS] | [yY])
+					echo -e "\e[93mExiting without saving...\e[0m"
+					exit 1
+					;;
+				*)
+					last_confirmation="Continuing..."
+					;;
+				esac
+			else
+				echo -e "\e[92mExiting...\e[0m"
+				exit 0
+			fi
+			;;
+
+		i)
+			echo -e $'\e[95mChange Iterations\e[0m'
+			# Change iterations
+			read -rp $'\e[96mEnter new iteration count: \e[0m' new_iterations
+			if [[ "$new_iterations" =~ ^[0-9]+$ ]] && [[ "$new_iterations" -gt 0 ]]; then
+				iterations="$new_iterations"
+				unsaved_changes=1
+				last_confirmation=$'\e[92mIterations updated to '"$iterations"$'.\e[0m'
+			else
+				last_confirmation="Error: Iteration count must be a positive integer."
+			fi
+			;;
+		p)
+			echo -e $'\e[95mChange Password\e[0m'
+			# Change password
+			read -rsp $'\e[91mEnter new password: \e[0m' new_password
+			echo
+			read -rsp $'\e[91mConfirm new password: \e[0m' confirm_password
+			echo
+			if [[ "$new_password" == "$confirm_password" ]]; then
+				password="$new_password"
+				unsaved_changes=1
+				last_confirmation=$'\e[92mPassword updated successfully.\e[0m'
+			else
+				last_confirmation="Error: Passwords do not match."
+			fi
+			;;
+		*)
+			last_confirmation="Unknown command."
+			;;
+
+		esac
+	done
+}
+
+main "$@"
