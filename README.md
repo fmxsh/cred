@@ -10,9 +10,9 @@ Encrypted with `openssl enc -aes-256-cbc -pbkdf2 -iter "$iterations" -salt -pass
 
 ## Purpose
 
-Allow scripts easy and secure access to credentials. Example use case: my automated Linux installation script needs credentials at different steps of installation.
+- Allow scripts easy and secure access to credentials. Example use case: my automated Linux installation script needs credentials at different steps of installation.
 
-Allow easy managment of credentials vault (Change, Read, Update, Delete).
+- Allow easy managment of credentials vault (Change, Read, Update, Delete).
 
 ## Intended use
 
