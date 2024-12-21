@@ -4,7 +4,10 @@
 
 Bash script to easily and securely manage credentials. Data stored in key-value pairs in an encrypted vault file.
 
-Credentials are not written unencrypted to disk at any point but only kept in memory (be aware of your swap file if you use one).
+Credentials are not written unencrypted to disk at any point but only kept in memory.
+
+> [!CAUTION]
+> Be aware of your swap file if you use one.
 
 Encrypted with `openssl enc -aes-256-cbc -pbkdf2 -iter "$iterations" -salt -pass pass:"$password"`
 
