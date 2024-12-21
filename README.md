@@ -80,8 +80,6 @@ Usage: ./cred [-e key] [-n] <vaultfile>
 
 ### Options
 
-## Options
-
 - `-e <key>`  
   Extracts the value of the specified key(s) from the vault.  
   Multiple keys can be specified as a space-separated string, e.g., `-e "key1 key2"`.
