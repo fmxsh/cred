@@ -53,7 +53,7 @@ Interactive terminal CRUD interface to alter key-value pairs and meta-data of va
 ──────────────────────────────────
 ```
 
-[note] Make sure to (w) write any change; values added, password change etc...
+[!NOTE] Make sure to (w) write any change; values added, password change etc...
 
 ## Command Line Interface (CLI)
 
