@@ -2,6 +2,8 @@
 
 ![Cover image](https://github.com/mtkld/cred/blob/master/front.jpg?raw=true)
 
+_Figure: Example of creating a vault file, adding a key-value pair, exiting interactive mode, and extracting the value on the commandline._
+
 Bash script to easily and securely manage credentials. Data stored in key-value pairs in an encrypted vault file.
 
 Credentials are not written unencrypted to disk at any point but only kept in memory.
