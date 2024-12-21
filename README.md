@@ -47,6 +47,7 @@ Interactive terminal CRUD interface to alter key-value pairs and meta-data of va
  (i) iterations [10000] change
  (p) password change
 ──────────────────────────────────
+ (h) help
  (w) write vault to disk
  (q) quit
 ──────────────────────────────────
