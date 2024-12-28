@@ -90,6 +90,36 @@ parse_metadata() {
 	echo $(declare -p metadata)
 }
 
+calculate_decryption_time_for_given_iter() {
+	local given_iter=$1
+	local test_iter=100000 # Fixed test iteration count for optimal balance
+
+	# Ensure input is valid
+	if [[ ! "$given_iter" =~ ^[0-9]+$ ]] || [[ "$given_iter" -le 0 ]]; then
+		echo "Invalid input. Please provide a valid positive number for iterations."
+		exit 1
+	fi
+
+	# Perform test
+	start_time=$(date +%s.%N)
+	echo -n "test-data" | openssl enc -aes-256-cbc -pbkdf2 -iter $test_iter -salt -pass pass:"testpassword" >/dev/null 2>&1
+	end_time=$(date +%s.%N)
+
+	# Calculate elapsed time for the test
+	elapsed_time=$(echo "$end_time - $start_time" | bc)
+
+	# Extrapolate the time for the given number of iterations
+	estimated_time=$(echo "$elapsed_time * $given_iter / $test_iter" | bc -l)
+
+	# Convert estimated time to minutes and seconds
+	minutes=$(echo "$estimated_time / 60" | bc)
+	seconds=$(echo "$estimated_time % 60" | bc | sed 's/^\./0./' | cut -d. -f1)
+
+	# Return the compact result
+	#echo "This iter takes roughly: ${minutes}m ${seconds}s on this system."
+	echo -e "This iter takes roughly: \e[40;91m ${minutes}m \e[0m \e[40;91m ${seconds}s \e[0m on this system."
+}
+
 # Main function
 main() {
 	local data_file=""
@@ -491,9 +521,11 @@ main() {
 			# Change iterations
 			read -rp $'\e[96mEnter new iteration count: \e[0m' new_iterations
 			if [[ "$new_iterations" =~ ^[0-9]+$ ]] && [[ "$new_iterations" -gt 0 ]]; then
+
 				iterations="$new_iterations"
+				iter_est_text=$(calculate_decryption_time_for_given_iter "$iterations")
 				unsaved_changes=1
-				last_confirmation=$'\e[92mIterations updated to '"$iterations"$'.\e[0m'
+				last_confirmation=$'\e[92mIterations updated to '"$iterations"$'.\e[0m '"$iter_est_text"
 			else
 				last_confirmation="Error: Iteration count must be a positive integer."
 			fi
