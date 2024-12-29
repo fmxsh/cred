@@ -124,7 +124,7 @@ generate_password() {
 	local password
 
 	# Generate the password using /dev/urandom and tr to filter allowed characters
-	password=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9!@#$%^&*()-_=+<>?,.' | head -c "$length")
+	password=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9!@#$%^&*()-_=+<>?,.:;~`[]{}|/' | head -c "$length")
 
 	# Ensure the password is exactly the desired length
 	while [[ ${#password} -lt $length ]]; do
