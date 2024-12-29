@@ -119,6 +119,20 @@ calculate_decryption_time_for_given_iter() {
 	#echo "This iter takes roughly: ${minutes}m ${seconds}s on this system."
 	echo -e "This iter takes roughly: \e[40;91m ${minutes}m \e[0m \e[40;91m ${seconds}s \e[0m on this system."
 }
+generate_password() {
+	local length="$1"
+	local password
+
+	# Generate the password using /dev/urandom and tr to filter allowed characters
+	password=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9!@#$%^&*()-_=+<>?,.' | head -c "$length")
+
+	# Ensure the password is exactly the desired length
+	while [[ ${#password} -lt $length ]]; do
+		password+=$(cat /dev/urandom | tr -dc 'a-zA-Z0-9!@#$%^&*()-_=+<>?,.' | head -c $((length - ${#password})))
+	done
+
+	echo "$password"
+}
 
 # Main function
 main() {
@@ -328,7 +342,7 @@ main() {
 		echo # Move to the next line after user input
 		case "$command" in
 		h)
-			echo -ne $'     Commands to manage vault\n\e[90m──────────────────────────────────\e[0m\n \e[35m(\e[0m\e[97ms\e[0m\e[35m)\e[0m set key\n \e[35m(\e[0m\e[97mu\e[0m\e[35m)\e[0m unset key\n \e[35m(\e[0m\e[97mv\e[0m\e[35m)\e[0m view keys\n \e[35m(\e[0m\e[97me\e[0m\e[35m)\e[0m edit key\'s value\n \e[35m(\e[0m\e[97mr\e[0m\e[35m)\e[0m rename key\n \e[35m(\e[0m\e[97my\e[0m\e[35m)\e[0m yank key to clipboard\n\e[90m──────────────────────────────────\e[0m\n \e[35m(\e[0m\e[97mi\e[0m\e[35m)\e[0m iterations ['"$iterations"'] change\n \e[35m(\e[0m\e[97mp\e[0m\e[35m)\e[0m password change\n\e[90m──────────────────────────────────\e[0m\n \e[35m(\e[0m\e[97mh\e[0m\e[35m)\e[0m help\n \e[35m(\e[0m\e[97mw\e[0m\e[35m)\e[0m write vault to disk\n \e[35m(\e[0m\e[97mq\e[0m\e[35m)\e[0m quit\n\e[90m──────────────────────────────────\e[0m\n'
+			echo -ne $'     Commands to manage vault\n\e[90m──────────────────────────────────\e[0m\n \e[35m(\e[0m\e[97ms\e[0m\e[35m)\e[0m set key\n \e[35m(\e[0m\e[97mu\e[0m\e[35m)\e[0m unset key\n \e[35m(\e[0m\e[97mv\e[0m\e[35m)\e[0m view keys\n \e[35m(\e[0m\e[97me\e[0m\e[35m)\e[0m edit key\'s value\n \e[35m(\e[0m\e[97mr\e[0m\e[35m)\e[0m rename key\n \e[35m(\e[0m\e[97my\e[0m\e[35m)\e[0m yank key to clipboard\n \e[35m(\e[0m\e[97mg\e[0m\e[35m)\e[0m generate password for key\n\e[90m──────────────────────────────────\e[0m\n \e[35m(\e[0m\e[97mi\e[0m\e[35m)\e[0m iterations ['"$iterations"'] change\n \e[35m(\e[0m\e[97mp\e[0m\e[35m)\e[0m password change\n\e[90m──────────────────────────────────\e[0m\n \e[35m(\e[0m\e[97mh\e[0m\e[35m)\e[0m help\n \e[35m(\e[0m\e[97mw\e[0m\e[35m)\e[0m write vault to disk\n \e[35m(\e[0m\e[97mq\e[0m\e[35m)\e[0m quit\n\e[90m──────────────────────────────────\e[0m\n'
 			;;
 		s)
 			echo -e $'\e[95mSet Key\e[0m'
@@ -544,6 +558,40 @@ main() {
 			else
 				last_confirmation="Error: Passwords do not match."
 			fi
+			;;
+		g)
+			echo -e $'\e[95mGenerate Password and Set Key\e[0m'
+
+			# Prompt for key
+			read -rp $'\e[96mEnter key name: \e[0m' key
+
+			# Validate the key
+			if [[ -z "$key" ]]; then
+				last_confirmation="Error: Key cannot be empty."
+				continue
+			elif [[ ! "$key" =~ ^[a-zA-Z0-9:._-]+$ ]]; then
+				last_confirmation="Error: Key contains illegal characters. Only letters, numbers, dots, dashes, colon, and underscores are allowed."
+				continue
+			fi
+
+			# Prompt for the desired password length
+			read -rp $'\e[93mEnter desired password length (default: 128): \e[0m' length
+
+			# Set default length if not provided
+			if [[ -z "$length" ]]; then
+				length=128
+			elif [[ ! "$length" =~ ^[0-9]+$ ]] || [[ "$length" -lt 1 ]]; then
+				last_confirmation="Error: Password length must be a positive integer."
+				continue
+			fi
+
+			# Generate the password
+			generated_password=$(generate_password "$length")
+
+			# Store the generated password as the value for the key
+			kv_store["$key"]="$generated_password"
+			unsaved_changes=1
+			last_confirmation=$'\e[92mGenerated password of length \e[93m'"$length"$'\e[92m and set for key \e[93m'"$key"$'\e[92m.\e[0m'
 			;;
 		*)
 			last_confirmation="Unknown command."

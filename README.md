@@ -48,6 +48,7 @@ Interactive terminal CRUD interface to alter key-value pairs and meta-data of va
  (e) edit key's value
  (r) rename key
  (y) yank key to clipboard
+ (g) generate password for key
 ──────────────────────────────────
  (i) iterations [10000] change
  (p) password change
