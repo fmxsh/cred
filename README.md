@@ -165,7 +165,7 @@ Simple example where you have defined MY_ACCESS_KEY and MY_SECRET_KEY in the vau
 
 Lets say you set the key `cloud_download` with the following value:
 
-````bash
+```bash
 
 # Example API Credentials
 ACCESS_KEY="{{MY_ACCESS_KEY}}"
@@ -227,4 +227,4 @@ cred -e "key1 key2 key3" my-vault
 # Pipe a password and extract a specific key
 echo "mypassword" | cred -e key1 my-vault
 
-````
+```
