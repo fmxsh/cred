@@ -152,7 +152,7 @@ When writing (with the w-command), because `__write` key exists and is set to th
 A generic solution for any blackblaze file could of course be made, as well as adding checks and support for other cloud services. Remember that this saving-logic is stored in the cred file itself, and usually one credfile is stored only in one dedicated location, whereas the logic above is enough. The beauty of this is that you could easily store the same cred-file onto a second location for backup, so at each save, both locations are updated.
 
 > [!NOTE]
-> These two keys exist in the vault file `B2CTL_INMYVAULT_APP_KEY` and `B2CTL_INMYVAULT_ENTRYBUCKET_KEY_ID`
+> The example presumes these two keys exist in the vault file `B2CTL_INMYVAULT_APP_KEY` and `B2CTL_INMYVAULT_ENTRYBUCKET_KEY_ID`
 
 > [!NOTE]
 > b2ctl accepts piped data, thus allowing me to avoid writing the content to temp file.
