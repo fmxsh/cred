@@ -42,6 +42,12 @@ Interactive terminal CRUD interface to alter key-value pairs and meta-data of va
 
 `(y) yank` - requires `xsel --clipboard`, to copy key's value to clipboard.
 
+### Why was `micro` chosen as editor?
+
+The goal is to never write any unencrypted data to the disk. An editor which can recieve piped content and return it back to the shell via stdout is needed. Micro can do this. Edit the content and press `Ctrl+Q` to exit the editor and return the content to the shell.
+
+`micro` is the only editor i found able to do this (had no success with N/Vim).
+
 ### Interface
 
 ```
@@ -85,11 +91,71 @@ echo "mypassword" | cred -e key1 my-vault
 
 You can pipe password to `cred` to skip the prompt if using -e option with its required argument. You can not pipe password for interactive mode.
 
-## Usage
+## A note on remote files
+
+`cred` can open vault files from remote locations. If the file path provided is a URL, `cred` will use `curl` to fetch the file.
+
+Care was taken to pipe the output of `curl` to a variable and not to a temp file on disk.
 
 ```bash
-Usage: ./cred [-e key] [-n] <vaultfile>
+content=$(curl -fSL "$file")
 ```
+
+Thus, remote files only live in memory on the local host, even in encrypted mode.
+
+## Overriding write functionality
+
+Create the key `__write` and add bash script (the script itself, not a path to a script) as value.
+
+The bash script will have access to
+
+- `__data_file_path` - path as given at the command line to `cred` (example: `cred my-vault` or `cred /home/user/my-vault` or `cred https://my-cloud.com/my-vault`).
+- `__data_file_name` - name of the vault file (example: `my-vault`).
+- `__data_file_content` - the content in vault-format as it will be written to the disk.
+
+Use them in the script by enclosing them in double curly braces, like `{{__data_file_path}}`.
+
+### Example overwriting write functionality
+
+To illustrate the usefullness of this feature, here is an example of my own use:
+
+Let'say we open the vault from a remote cloud location (with web address). It is easy, as `cred` just checks if the file path you provide is a URL and if so, uses `curl` to get the file.
+
+```bash
+> cred https://f003.backblazeb2.com/file/my-bucket/the-cred-file
+```
+
+But how do we save the file back to the cloud? We can not rely on a generic curl operation. We need specifc logic to authenticate against the cloud API and use specific API operations to upload the file.
+
+The additional logic needed to save the file back to the cloud can be added to the `__write` key in the vault.
+
+```bash
+# First check what file we try to save
+if [[ "{{__data_file_path}}" == "https://f003.backblazeb2.com/file/my-bucket/the-cred-file" ]]; then
+
+    # Knowing the file, we know how and where to upload it
+    # I use b2ctl to upload to Backblaze B2
+    # It requires 2 environment variables to be set
+	export B2CTL_APP_KEY="{{B2CTL_INMYVAULT_APP_KEY}}"
+	export B2CTL_KEY_ID="{{B2CTL_INMYVAULT_ENTRYBUCKET_KEY_ID}}"
+
+    # Upload the file
+    # The content to be saved is piped to b2ctl which is capable of uploading to Backblaze B2
+	echo -n "{{__data_file_content}}" | b2ctl --up {{__data_file_name}}
+else
+	echo "The variable does not equal the string."
+fi
+```
+
+When writing (with the w-command), because `__write` key exists and is set to the above, the file content will be uploaded, given that the current open file is: https://f003.backblazeb2.com/file/my-bucket/the-cred-file
+
+A generic solution for any blackblaze file could of course be made, as well as adding checks and support for other cloud services. Remember that this saving-logic is stored in the cred file itself, and usually one credfile is stored only in one dedicated location, whereas the logic above is enough. The beauty of this is that you could easily store the same cred-file onto a second location for backup, so at each save, both locations are updated.
+
+> [!NOTE]
+> These two keys exist in the vault file `B2CTL_INMYVAULT_APP_KEY` and `B2CTL_INMYVAULT_ENTRYBUCKET_KEY_ID`
+
+> [!NOTE]
+> b2ctl accepts piped data, thus allowing me to avoid writing the content to temp file.
 
 ### Embedded and execute bash scripts
 

@@ -1,5 +1,29 @@
 #!/bin/bash
 
+allow_edit() {
+	local data_file="$1"
+	local data_file_is_remote="$2"
+	if [[ $data_file_is_remote -eq 1 ]]; then
+		# If we passed allow_edit and have come here, the __write must exist
+		if key_exists_in_kv_store "__write"; then
+			return 0 # True: Editing allowed
+		else
+			return 1 # False: Editing not allowed
+		fi
+	fi
+
+	# Local file, editing allowed
+	return 0 # True: Editing allowed
+}
+
+key_exists_in_kv_store() {
+	local key="$1"
+	if [[ -n "${kv_store[$key]}" ]]; then
+		return 0 # True: Key exists
+	else
+		return 1 # False: Key does not exist
+	fi
+}
 print_confirmation() {
 	local text="$1"
 	echo -ne "$text"
@@ -41,6 +65,11 @@ decrypt_data() {
 	echo -n "$data" | base64 -d | openssl enc -d -aes-256-cbc -pbkdf2 -iter "$iterations" -pass pass:"$password" 2>&1
 }
 
+is_remote_file() {
+	local file="$1"
+	[[ "$file" =~ ^https?:// ]]
+}
+
 # Generate metadata for the vault file
 generate_metadata() {
 	local encrypted_data="$1"
@@ -48,9 +77,9 @@ generate_metadata() {
 	local timestamp
 	timestamp=$(date +"%Y-%m-%d %H:%M:%S")
 
-	echo "number-of-iterations $iterations" >"$data_file"
-	echo "last-modified $timestamp" >>"$data_file"
-	echo "encrypted-data $encrypted_data" >>"$data_file"
+	echo "number-of-iterations $iterations"
+	echo "last-modified $timestamp"
+	echo "encrypted-data $encrypted_data"
 }
 
 # Extract key(s) function
@@ -84,10 +113,27 @@ extract_keys() {
 parse_metadata() {
 	local file="$1"
 	declare -A metadata
-	while read -r key value; do
-		metadata["$key"]="$value"
-	done <"$file"
-	echo $(declare -p metadata)
+
+	# Check if the file is a URL (starts with http:// or https://)
+	if [[ "$file" =~ ^https?:// ]]; then
+		# Fetch the content using curl
+		content=$(curl -fSL "$file")
+		if [[ $? -ne 0 ]]; then
+			echo "Error: Unable to fetch metadata from URL: $file"
+			exit 1
+		fi
+		# Process the fetched content line by line
+		while read -r key value; do
+			metadata["$key"]="$value"
+		done <<<"$content"
+	else
+		# Process the local file
+		while read -r key value; do
+			metadata["$key"]="$value"
+		done <"$file"
+	fi
+
+	echo "$(declare -p metadata)"
 }
 
 calculate_decryption_time_for_given_iter() {
@@ -173,6 +219,7 @@ execute_key() {
 # Main function
 main() {
 	local data_file=""
+	local data_file_is_remote=0
 	local extract_key=""
 	local create_new=0
 	local iterations="10000" # Default iterations
@@ -229,6 +276,9 @@ main() {
 		*)
 			if [[ -z "$data_file" ]]; then
 				data_file="$1"
+				if is_remote_file "$data_file"; then
+					data_file_is_remote=1
+				fi
 			else
 				echo "Error: Multiple data files specified: '$data_file' and '$1'."
 				exit 1
@@ -284,13 +334,17 @@ main() {
 		# Call the extract_keys function with the loaded kv_store
 		extract_keys "$extract_key"
 		exit 0
-	fi
-
-	if [[ $create_new -eq 1 ]]; then
+	elif [[ $create_new -eq 1 ]]; then
 		if [[ -z "$data_file" ]]; then
 			echo "Please specify a file name for the new vault."
 			exit 1
 		fi
+
+		if is_remote_file "$file"; then
+			echo "Error: Cannot create a new vault with a remote file. New vault creation must have local path provided."
+			exit 1
+		fi
+
 		if [[ -f "$data_file" ]]; then
 			echo "Error: File '$data_file' already exists. Choose a different name or delete the existing file."
 			exit 1
@@ -313,9 +367,9 @@ main() {
 
 		# Initialize encrypted-data with an empty base64 string
 		encrypted_data=$(echo -n "" | base64 -w 0)
-		generate_metadata "$encrypted_data" "$iterations"
+		generate_metadata "$encrypted_data" "$iterations" >"$data_file"
 		last_confirmation=$'\e[92mNew vault created: '"$data_file"$'\e[0m'
-	elif [[ -f "$data_file" ]]; then
+	elif [[ $data_file_is_remote -eq 1 || -f "$data_file" ]]; then
 		# Prompt for password
 		if read -t 0; then
 			read -rs password
@@ -400,7 +454,14 @@ main() {
 
 			;;
 		s)
+
 			echo -e $'\e[95mSet Key\e[0m'
+
+			if ! allow_edit "$data_file" "$data_file_is_remote"; then
+				last_confirmation="Disabled: No edit allowed as file is remote and no support to save it back exists."
+				continue
+			fi
+
 			# Prompt for key
 			read -rp $'\e[96mEnter key: \e[0m' key
 
@@ -423,7 +484,14 @@ main() {
 			last_confirmation=$'\e[92mKey \''"$key"$'\' and value set.\e[0m'
 			;;
 		u)
+
 			echo -e $'\e[95mUnset Key\e[0m'
+
+			if ! allow_edit "$data_file" "$data_file_is_remote"; then
+				last_confirmation="Disabled: No edit allowed as file is remote and no support to save it back exists."
+				continue
+			fi
+
 			read -rp $'\e[96mEnter key to delete: \e[0m' key
 
 			if [[ -z "$key" ]]; then
@@ -458,8 +526,15 @@ main() {
 
 			# If the value was edited, update it in kv_store
 			if [[ "$edited_value" != "$current_value" ]]; then
+				# Put it down here, because we still allow user to open the value in editor
+				if ! allow_edit "$data_file" "$data_file_is_remote"; then
+					last_confirmation="Disabled: No edit allowed as file is remote and no support to save it back exists."
+					continue
+				fi
+
 				kv_store["$key"]="$edited_value"
 				unsaved_changes=1
+
 				last_confirmation=$'\e[92mKey \''"$key"$'\' value updated.\e[0m'
 			else
 				last_confirmation=$'\e[93mNo changes made to key \''"$key"$'\'.\e[0m'
@@ -505,7 +580,12 @@ main() {
 			fi
 			;;
 		r) # New 'rename' option for renaming a key
+
 			echo -e $'\e[95mRename Key\e[0m'
+			if ! allow_edit "$data_file" "$data_file_is_remote"; then
+				last_confirmation="Disabled: No edit allowed as file is remote and no support to save it back exists."
+				continue
+			fi
 
 			# Prompt for the current (target) key to rename
 			read -rp $'\e[96mEnter the key to rename: \e[0m' old_key
@@ -544,6 +624,16 @@ main() {
 			last_confirmation=$'\e[92mKey \''"$old_key"$'\'renamed successfully to \''"$new_key"$'\'.\e[0m'
 			;;
 		w)
+			if ! allow_edit "$data_file" "$data_file_is_remote"; then
+				echo -e $'\e[95mWrite data to file\e[0m'
+				last_confirmation="Disabled: No edit allowed as file is remote and no support to save it back exists."
+				continue
+			fi
+
+			if [[ $unsaved_changes -ne 1 ]]; then
+				last_confirmation=$'\e[93mNo changes made. Nothing changes to write.\e[0m'
+				continue
+			fi
 			#echo -e $'\e[95mWrite Vault to Disk\e[0m'
 			# Combine all key-value pairs into a single string using actual newlines
 			combined_data=""
@@ -558,7 +648,33 @@ main() {
 
 			# Encrypt the combined string
 			encrypted_data=$(encrypt_data "$combined_data" "$password" "$iterations")
-			generate_metadata "$encrypted_data" "$iterations"
+
+			# If remote file, we can save it back if we have overridden the write function
+			# It is overridden by defining code in key __write
+			if [[ $data_file_is_remote -eq 1 ]]; then
+
+				# If we passed allow_edit and have come here, the __write must exist
+				if key_exists_in_kv_store "__write"; then
+					# User has defined function knowing how to write back to the remote storage
+					kv_store["__data_file_path"]="$data_file"
+					kv_store["__data_file_name"]=$(basename $data_file)
+					generated_metadata=$(generate_metadata "$encrypted_data" "$iterations")
+					kv_store["__data_file_content"]="$generated_metadata"
+					# NOTE: We do not check for return state, like what did the eval return... we just assume it succeeded and confirm as if
+					execute_key "__write"
+					unset kv_store["__data_file_path"]
+					unset kv_store["__data_file_name"]
+					unset kv_store["__data_file_content"]
+
+				else
+					echo "Key '__write' does not exist in kv_store."
+				fi
+
+			else
+
+				generate_metadata "$encrypted_data" "$iterations" >"$data_file"
+			fi
+
 			unsaved_changes=0
 			last_confirmation=$'\e[92mData saved successfully.\e[0m'
 			;;
@@ -587,6 +703,11 @@ main() {
 
 		i)
 			echo -e $'\e[95mChange Iterations\e[0m'
+
+			if ! allow_edit "$data_file" "$data_file_is_remote"; then
+				last_confirmation="Disabled: No edit allowed as file is remote and no support to save it back exists."
+				continue
+			fi
 			# Change iterations
 			read -rp $'\e[96mEnter new iteration count: \e[0m' new_iterations
 			if [[ "$new_iterations" =~ ^[0-9]+$ ]] && [[ "$new_iterations" -gt 0 ]]; then
@@ -601,6 +722,11 @@ main() {
 			;;
 		p)
 			echo -e $'\e[95mChange Password\e[0m'
+			if ! allow_edit "$data_file" "$data_file_is_remote"; then
+				last_confirmation="Disabled: No edit allowed as file is remote and no support to save it back exists."
+				continue
+			fi
+
 			# Change password
 			read -rsp $'\e[91mEnter new password: \e[0m' new_password
 			echo
@@ -617,6 +743,10 @@ main() {
 		g)
 			echo -e $'\e[95mGenerate Password and Set Key\e[0m'
 
+			if ! allow_edit "$data_file" "$data_file_is_remote"; then
+				last_confirmation="Disabled: No edit allowed as file is remote and no support to save it back exists."
+				continue
+			fi
 			# Prompt for key
 			read -rp $'\e[96mEnter key name: \e[0m' key
 
