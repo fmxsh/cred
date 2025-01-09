@@ -6,10 +6,28 @@ _Figure: (New commands have been added since this image was created) Example of 
 
 Bash script to easily and securely manage credentials. Data stored in key-value pairs in an encrypted vault file.
 
-Credentials are not written unencrypted to disk at any point but only kept in memory.
+Made to:
+
+- Work in most live environments with widely available tools and Bash.
+- Store all credentials in a single file for easy transfer and download
+- Easy to integrate with other scripts (bash scripts can be included in vault file that when called inside `cred` will do whatever bash can do, for example set vualt-credentials as envirronment variables and call the other relevant scripts on the host system)
+- Easy to integrate with cloud services (default save function can be overridden with own internal script to upload the vault file to a cloud service, and `cred` can open URL's as vault files)
+- Easy to update and change cryptographic procedures (override encryption and decryption functions)
+- Easy to update meta settings of the vault file (iterations, password etc...)
+- Quality of life features to easily manage and update the key-value pairs in the vault file (interactive mode with CRUD operations)
+- Secure editing of vault (all changes are written to file only when specific write command is invoked, similar to `fdisk`)
+- Secure handling of decrypted content (only in memory, not on disk)
+- Keep a history of modifications to the vualt.
+- Provide options to pipe password to open vault and options to extract values from vault at command line.
+
+> [!NOTE]
+> This documentation is a work in progress.
 
 > [!CAUTION]
-> Be aware of your swap file if you use one.
+> Decrypted content resides only in RAM-memory, not on disk. Howver, this is not designed to protect against serious attacks on the RAM-memory of the system. Ideally, decrypting content would stream it to `keyctl` with minimum exposure in memory. This is not implemented. An approach is to wipe variables after use, but successfull wipe is not a guarantee because of internal memory managment complexity of the system.
+
+> [!CAUTION]
+> Be aware of your swap file if you use one. Decrypted content resides only in RAM-memory, but swap file can be a risk.
 
 Encrypted with `openssl enc -aes-256-cbc -pbkdf2 -iter "$iterations" -salt -pass pass:"$password"`
 
@@ -40,6 +58,12 @@ Interactive terminal CRUD interface to alter key-value pairs and meta-data of va
 
 `(e) edit` - requires `micro` text editor. Used to edit key's value in memory without writing to file on disk.
 
+> [!NOTE]
+> Custom editor: You can set alternative editor by setting the variable USE_EDITOR, for example USE_EDITOR="nvim" at the top of the script.
+
+> [!CAUTION]
+> If you set a custom editor, it will use temp-files on disk to pass data between the editor and the script. (If you use the default editor `micro`, no data is written to disk).
+
 `(y) yank` - requires `xsel --clipboard`, to copy key's value to clipboard.
 
 ### Why was `micro` chosen as editor?
@@ -52,7 +76,7 @@ The goal is to never write any unencrypted data to the disk. An editor which can
 
 ```
      Commands to manage vault
-──────────────────────────────────
+─────────────────────────────────────
  (s) set key
  (u) unset key
  (v) view keys
@@ -61,18 +85,43 @@ The goal is to never write any unencrypted data to the disk. An editor which can
  (y) yank key to clipboard
  (g) generate password for key
  (x) execute key as bash script
-──────────────────────────────────
+ (X) list bash scripts and exeucte
+ (b) toggle base64 enc/dec for key
+─────────────────────────────────────
+ (m) key-marking mode
  (i) iterations [10000] change
  (p) password change
-──────────────────────────────────
- (h) help
+─────────────────────────────────────
+ (?) help
+ (I) additional info
  (w) write vault to disk
  (q) quit
-──────────────────────────────────
+─────────────────────────────────────
 ```
 
 > [!NOTE]
 > Make sure to (w) write any change; values added, password change etc...
+
+### Options in interactive mode
+
+Things to know
+
+#### (X)
+
+This option lists all keys that have a bash script as value. You can then choose to execute one.
+
+For the bash script to be listed, it must start with `#!/bin/bash`
+
+#### (m) - key-marking mode
+
+Enter key-marking mode, the selected key remains till pressing `n`.
+
+> [!TIP]
+> This means you can purposefully avoid including `#!/bin/bash` in the script to avoid it being listed. It will execute the same, as it is passed to `eval` when executed.
+
+#### (h)
+
+Shows a key's history. Each time a key is modified, a copy of the previous value is saved in the history. You can view the history of a key with this option.
 
 ## Command Line Interface (CLI)
 
@@ -91,6 +140,42 @@ echo "mypassword" | cred -e key1 my-vault
 
 You can pipe password to `cred` to skip the prompt if using -e option with its required argument. You can not pipe password for interactive mode.
 
+### Options
+
+- `-e <key>`
+  Extracts the value of the specified key(s) from the vault.
+  Multiple keys can be specified as a space-separated string, e.g., `-e "key1 key2"`.
+
+- `-n`
+  Creates a new vault file.
+
+  Desired password for vault can be piped.
+
+- `-h`
+  Displays the help message with usage instructions and examples.
+
+#### Example use
+
+````bash
+# Create a new vault:
+cred -n my-vault
+
+# Open the vault interactively
+cred my-vault
+
+# Pipe a password and open the vault
+echo "mypassword" | cred my-vault
+
+# Extract the value of a specific key
+cred -e key1 my-vault
+
+# Extract values of multiple keys
+cred -e "key1 key2 key3" my-vault
+
+# Pipe a password and extract a specific key
+echo "mypassword" | cred -e key1 my-vault
+
+``
 ## A note on remote files
 
 `cred` can open vault files from remote locations. If the file path provided is a URL, `cred` will use `curl` to fetch the file.
@@ -99,9 +184,141 @@ Care was taken to pipe the output of `curl` to a variable and not to a temp file
 
 ```bash
 content=$(curl -fSL "$file")
-```
+````
 
 Thus, remote files only live in memory on the local host, even in encrypted mode.
+
+## Other special keys
+
+Create the key `__info` and its content will be printed when entering the vault and when `i` option in interactive mode is used.
+
+Purppose: As you can write keys holding bash script to be executed, the `__info` key can be used to provide information about specific use cases.
+
+## Custom options
+
+You can define options of your own like '-u' or '--upload'. You just use them when calling `cred`.
+
+```bash
+cred --upload "some data related to upload" target-vault-file
+```
+
+This creates `__opt_upload` key in the vault file with the value "some data related to upload".
+
+Then, `-u` will create `_opt_u` (note, only one underscore) and `--upload` will create `__opt_upload` (note, two underscores).
+
+You can not create custom options for the existing ones `-e`, `-n`, `-h`.
+
+> [!NOTE]
+> This is used for custom functionality. Bash code that has been added to a key and is executed (the `x` option) can use data from custom options. Say you want to encrypt a directory and upload to a cloud service, you can pass the target dir at the command line like `cred -s "./source-directory" https://example-cloud.com/mystorage/my-vault-file`. There, -s is the custom option.
+
+## Overriding encryption and decryption functionality
+
+The default encryption and decryption functionality can be updated by creating the key `__ced` and `__cdd` respectively. These stand for "custom encrypt data" and "custom decrypt data".
+
+The purpose is the be able to easily update the cryptographic procedure.
+
+> [!CAUTION]
+> I am no cryptography expert. After some superficial research, CBC, HMAC and Argon2 seemed a good choice. CBC over GCM because openssl didnt have enough support, and [this](https://security.stackexchange.com/a/184307) from [here](https://security.stackexchange.com/questions/184305/why-would-i-ever-use-aes-256-cbc-if-aes-256-gcm-is-more-secure).
+
+> [!WARNING]
+> If you override these, ensure to test on a test-vaul file first. Onec they work, open the target vault, add or update `__ced` and `__cdd` keys with the new functions. Then, writing the vault back to the file, will encrypt the data with the new fucntion.
+
+The functions must be defined as functions, and must return the encrypted or decrypted data.
+
+> [!NOTE]
+> As you can see in the encrypt example, we need to store salt, iv etc. We serialize an associative array with all parameters and the encrypted data. Because we write also the callback for decrypting, we know how to unpack it. `cred` doesn't care about what the encrypt function return, it only stores in the file what is returned, and then sends it to the decrypt function on opening the vault.
+
+> [!WARNING]
+> Be aware of the iterations parameter. If your previous encryption was PBKDF2 with 10000 iterations, and you set `__ced` and `__cdd` to CBC+HMAC+Argon2 while keeping 10000 iterations, the cryptographic operations will take very long time.
+
+> ! [!NOTE]
+> The option to test iteration-time will test with `__ced` if such is set, instead of with default PBKDF2-approach. This is useful to see how long time the new approach will take. Start testing with low iteration count, and increase until you find a suitable value.
+
+### Example of custom encryption function
+
+```bash
+custom_encrypt_data() {
+  data="$1"
+  password="$2"
+  iter="$3"
+
+  # Generate random values
+  salt=$(openssl rand -base64 16)
+
+  iv=$(openssl rand -hex 16)
+
+  hmac_key=$(openssl rand -hex 32)
+
+  # Derive key using Argon2 and extract the hash portion
+  encoded_key=$(echo -n "$password" | argon2 "$salt" -id -t "$iter" -m 16 -p 2 -l 32 | grep -oP '(?<=Encoded:).*' | xargs)
+
+  # Extract the actual Base64-encoded hash (last segment)
+  base64_hash=$(echo "$encoded_key" | awk -F'$' '{print $NF}')
+
+  # Decode Base64-encoded hash into hexadecimal
+  key=$(echo "$base64_hash" | base64 -d | xxd -p -c 256)
+
+  # Encrypt the data and Base64 encode the result
+  encrypted=$(echo -n "$data" | openssl enc -aes-256-cbc -K "$key" -iv "$iv" -e | base64 -w 0)
+
+  # Generate HMAC
+  hmac=$(echo -n "$encrypted" | openssl dgst -sha256 -mac HMAC -macopt hexkey:$hmac_key | awk '{print $2}')
+
+  # Create an associative array
+  declare -A encryption_result
+  encryption_result["salt"]=$salt
+  encryption_result["iv"]=$iv
+  encryption_result["encrypted_data"]=$encrypted
+  encryption_result["hmac"]=$hmac
+  encryption_result["hmac_key"]=$hmac_key
+
+  # Serialize and return the array
+  echo -n $(declare -p encryption_result)
+}
+```
+
+### Example of custom decryption function
+
+```bash
+custom_decrypt_data() {
+  serialized_data="$1"
+  password="$2"
+  iter="$3"
+
+  # Deserialize the serialized array
+  eval "$(echo "$serialized_data")"
+
+  # Extract values from the associative array
+  salt="${encryption_result["salt"]}"
+  iv="${encryption_result["iv"]}"
+  encrypted="${encryption_result["encrypted_data"]}"
+  hmac="${encryption_result["hmac"]}"
+  hmac_key="${encryption_result["hmac_key"]}"
+
+  # Derive the encryption key using Argon2 and extract the hash portion
+  encoded_key=$(echo -n "$password" | argon2 "$salt" -id -t "$iter" -m 16 -p 2 -l 32 | grep -oP '(?<=Encoded:).*' | xargs)
+
+  # Extract the actual Base64-encoded hash (last segment)
+  base64_hash=$(echo "$encoded_key" | awk -F'$' '{print $NF}')
+
+  # Decode Base64-encoded hash into hexadecimal
+  key=$(echo "$base64_hash" | base64 -d | xxd -p -c 256)
+
+  # Validate the HMAC
+  calculated_hmac=$(echo -n "$encrypted" | openssl dgst -sha256 -mac HMAC -macopt hexkey:$hmac_key | awk '{print $2}')
+  if [[ "$calculated_hmac" != "$hmac" ]]; then
+    echo "Error: HMAC validation failed. Data integrity compromised."
+    return 1
+  fi
+
+  # Decode Base64 and decrypt the data
+  decrypted=$(echo -n "$encrypted" | base64 -d | openssl enc -aes-256-cbc -K "$key" -iv "$iv" -d)
+
+  # Output the decrypted data
+  echo -n "$decrypted"
+}
+
+```
 
 ## Overriding write functionality
 
@@ -115,7 +332,10 @@ The bash script will have access to
 
 Use them in the script by enclosing them in double curly braces, like `{{__data_file_path}}`.
 
-### Example overwriting write functionality
+> [!IMPORTANT]
+> The script must return 0 on success and non-zero on failure. So do 'exit 0' or 'exit 1' at the end of the script. Saving happens on 0 return.
+
+### Example overriding write functionality
 
 To illustrate the usefullness of this feature, here is an example of my own use:
 
@@ -152,18 +372,26 @@ When writing (with the w-command), because `__write` key exists and is set to th
 A generic solution for any blackblaze file could of course be made, as well as adding checks and support for other cloud services. Remember that this saving-logic is stored in the cred file itself, and usually one credfile is stored only in one dedicated location, whereas the logic above is enough. The beauty of this is that you could easily store the same cred-file onto a second location for backup, so at each save, both locations are updated.
 
 > [!NOTE]
-> The example presumes these two keys exist in the vault file `B2CTL_INMYVAULT_APP_KEY` and `B2CTL_INMYVAULT_ENTRYBUCKET_KEY_ID`
+> The example presumes these two keys exist in the vault file: `B2CTL_INMYVAULT_APP_KEY` and `B2CTL_INMYVAULT_ENTRYBUCKET_KEY_ID`
 
 > [!NOTE]
 > b2ctl accepts piped data, thus allowing me to avoid writing the content to temp file.
 
-### Embedded and execute bash scripts
+## Embedded and execute bash scripts
 
-Create a key and edit it (e option) to include a bash script. The script can include other keys as {{KEY}}. When the key is executed, the script will be run with the values of the keys inserted.
+There are 2 ways of including values from the vault in a bash script that exist in a key.
+
+1. Create a key and edit it (e option) to include a bash script. The script can include other keys as {{KEY}}. When the key is executed, the script will be run with the values of the keys inserted.
+2. Every key in the vault is exported as vault\_[key name] and can be used directly in a bash script.
+
+> [!TIP]
+> The key that is eval:ed as can change values of keys in the vault, by using vault\_[key name] as variable names. Example: `vault_mykey="new value"`.
+
+### Example of inserting values into a bash script
 
 Simple example where you have defined MY_ACCESS_KEY and MY_SECRET_KEY in the vault:
 
-Lets say you set the key `cloud_download` with the following value:
+Lets say you set the key `cloud_download` with the following bash script as value:
 
 ```bash
 
@@ -194,37 +422,4 @@ fi
 
 `cred` will replace `{{MY_ACCESS_KEY}}` and `{{MY_SECRET_KEY}}` with the values of the keys `MY_ACCESS_KEY` and `MY_SECRET_KEY` when the key `cloud_download` is executed with the `x` option.
 
-### Options
-
-- `-e <key>`
-  Extracts the value of the specified key(s) from the vault.
-  Multiple keys can be specified as a space-separated string, e.g., `-e "key1 key2"`.
-
-- `-n`
-  Creates a new vault file.
-
-- `-h`
-  Displays the help message with usage instructions and examples.
-
-### Example use
-
-```bash
-# Create a new vault:
-cred -n my-vault
-
-# Open the vault interactively
-cred my-vault
-
-# Pipe a password and open the vault
-echo "mypassword" | cred my-vault
-
-# Extract the value of a specific key
-cred -e key1 my-vault
-
-# Extract values of multiple keys
-cred -e "key1 key2 key3" my-vault
-
-# Pipe a password and extract a specific key
-echo "mypassword" | cred -e key1 my-vault
-
-```
+`
