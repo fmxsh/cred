@@ -211,11 +211,30 @@ You can not create custom options for the existing ones `-e`, `-n`, `-h`.
 > [!NOTE]
 > This is used for custom functionality. Bash code that has been added to a key and is executed (the `x` option) can use data from custom options. Say you want to encrypt a directory and upload to a cloud service, you can pass the target dir at the command line like `cred -s "./source-directory" https://example-cloud.com/mystorage/my-vault-file`. There, -s is the custom option.
 
+## Cred functions
+
+Anu function available to cred (inculding overridden ones like `__ced` and `__cdd` that defines custom_encrypt_data and custom_decrypt_data, can be called from a key that is executed as a bash script.
+
+Usefull for for example using the same custom encryption and decryption functions in, say, a script that uploads the vault file to a cloud service and wants to encrypt it first.
+
+## Note on history
+
+When editing a key's value (e option) history is saved as a `diff` between old and new value of key. Intended to save less data when editing for example scripts internal to the vault.
+
+Setting keys (s option) does not save diff history, as no lengthy content is expected to be modified this way.
+
 ## Overriding encryption and decryption functionality
 
 The default encryption and decryption functionality can be updated by creating the key `__ced` and `__cdd` respectively. These stand for "custom encrypt data" and "custom decrypt data".
 
 The purpose is the be able to easily update the cryptographic procedure.
+
+`__ccv` - Custom crypto version, update this to keep track of when you change the encryption and decryption functions.
+
+The custom crypto version number is stored in the cred file, and you can store it in any other encrypted file you generate (like if you have a script in `cred` that packages a directory and uploads to a cloud.
+
+> [!TIP]
+> Each time you change the custom cryptography functions, update the `__ccv` key to keep track of the version. Store the previous version number along with the previous functions, in case you later find data encrypted with a previous version. This is important because for example if you use Argon2, you will have defined specific parameters that must be the same to decrypt.
 
 > [!CAUTION]
 > I am no cryptography expert. After some superficial research, CBC, HMAC and Argon2 seemed a good choice. CBC over GCM because openssl didnt have enough support, and [this](https://security.stackexchange.com/a/184307) from [here](https://security.stackexchange.com/questions/184305/why-would-i-ever-use-aes-256-cbc-if-aes-256-gcm-is-more-secure).
@@ -235,6 +254,9 @@ The functions must be defined as functions, and must return the encrypted or dec
 > The option to test iteration-time will test with `__ced` if such is set, instead of with default PBKDF2-approach. This is useful to see how long time the new approach will take. Start testing with low iteration count, and increase until you find a suitable value.
 
 ### Example of custom encryption function
+
+> [!NOTE]
+> There is an extended example further down.
 
 ```bash
 custom_encrypt_data() {
@@ -278,6 +300,9 @@ custom_encrypt_data() {
 ```
 
 ### Example of custom decryption function
+
+> [!NOTE]
+> There is an extended example further down.
 
 ```bash
 custom_decrypt_data() {
@@ -422,4 +447,157 @@ fi
 
 `cred` will replace `{{MY_ACCESS_KEY}}` and `{{MY_SECRET_KEY}}` with the values of the keys `MY_ACCESS_KEY` and `MY_SECRET_KEY` when the key `cloud_download` is executed with the `x` option.
 
-`
+## Extended example of custom encryption and decryption functions
+
+```bash
+#!/bin/bash
+
+custom_encrypt_data() {
+	data="$1"
+	password="$2"
+	iter="$3"
+	output_file="$4"
+
+	# If the fourth argument is not set, default to $data.enc
+	if [[ -z "$output_file" && -f "$data" ]]; then
+		output_file="${data}.enc"
+	fi
+
+	# Generate random values
+	salt=$(openssl rand -base64 16)
+	iv=$(openssl rand -hex 16)
+	hmac_key=$(openssl rand -hex 32)
+
+	# Derive key using Argon2 and extract the hash portion
+	encoded_key=$(echo -n "$password" | argon2 "$salt" -id -t "$iter" -m 16 -p 2 -l 32 | grep -oP '(?<=Encoded:).*' | xargs)
+
+	# Extract the actual Base64-encoded hash (last segment)
+	base64_hash=$(echo "$encoded_key" | awk -F'$' '{print $NF}')
+
+	# Because the Base64 encoding is not padded from argon
+	# we need to add the correct padding for older versions of base64, like 9.3
+	# Calculate the missing padding
+	padding=$(((4 - (${#base64_hash} % 4)) % 4))
+
+	# Add the correct number of '=' padding characters
+	base64_hash="${base64_hash}$(printf '=%.0s' $(seq 1 $padding))"
+
+	# Decode Base64-encoded hash into hexadecimal
+	key=$(echo "$base64_hash" | base64 -d | xxd -p -c 256)
+
+	if [[ -f "$data" ]]; then
+		# Set output file
+		output_file="${data}.enc"
+
+		# Pack metadata into a binary format (salt, iv, hmac_key)
+		{
+			printf "%-24s" "$salt"     # 24 bytes for salt (base64)
+			printf "%-32s" "$iv"       # 32 bytes for IV (hex)
+			printf "%-64s" "$hmac_key" # 64 bytes for HMAC key (hex)
+			openssl enc -aes-256-cbc -K "$key" -iv "$iv" -e -in "$data"
+		} >"$output_file"
+
+		echo "File encrypted with embedded metadata: $output_file"
+	else
+		# For raw data, proceed as before
+		encrypted=$(echo -n "$data" | openssl enc -aes-256-cbc -K "$key" -iv "$iv" -e | base64 -w 0)
+
+		# Generate HMAC
+		hmac=$(echo -n "$encrypted" | openssl dgst -sha256 -mac HMAC -macopt hexkey:$hmac_key | awk '{print $2}')
+
+		# Create an associative array
+		declare -A encryption_result
+		encryption_result["salt"]=$salt
+		encryption_result["iv"]=$iv
+		encryption_result["encrypted_data"]=$encrypted
+		encryption_result["hmac"]=$hmac
+		encryption_result["hmac_key"]=$hmac_key
+
+		# Serialize and return the array
+		echo -n $(declare -p encryption_result)
+	fi
+}
+
+```
+
+```bash
+#!/bin/bash
+custom_decrypt_data() {
+	data="$1"
+	password="$2"
+	iter="$3"
+	output_file="$4"
+
+	# If the fourth argument is not set, default to $data.enc
+	if [[ -z "$output_file" && -f "$data" ]]; then
+		output_file="${data}.dec"
+	fi
+
+	if [[ -f "$data" ]]; then
+		# File decryption mode
+		input_file="$data"
+
+		# Extract metadata (salt, iv, hmac_key)
+		salt=$(head -c 24 "$input_file" | tr -d ' ')
+		iv=$(dd if="$input_file" bs=1 skip=24 count=32 2>/dev/null | tr -d ' ')
+		hmac_key=$(dd if="$input_file" bs=1 skip=56 count=64 2>/dev/null | tr -d ' ')
+
+		# Derive the encryption key using Argon2
+		encoded_key=$(echo -n "$password" | argon2 "$salt" -id -t "$iter" -m 16 -p 2 -l 32 | grep -oP '(?<=Encoded:).*' | xargs)
+		base64_hash=$(echo "$encoded_key" | awk -F'$' '{print $NF}')
+
+		# Correct Base64 padding
+		padding=$(((4 - (${#base64_hash} % 4)) % 4))
+		base64_hash="${base64_hash}$(printf '=%.0s' $(seq 1 $padding))"
+
+		# Decode Base64-encoded hash into hexadecimal
+		key=$(echo "$base64_hash" | base64 -d | xxd -p -c 256)
+
+		# Decrypt the file
+		#encrypted_data=$(dd if="$input_file" bs=1 skip=120 2>/dev/null)
+		#echo -n "$encrypted_data" | openssl enc -aes-256-cbc -K "$key" -iv "$iv" -d > "$output_file"
+
+        # Use command substitution as bash can not handle binary data
+
+		openssl enc -aes-256-cbc -K "$key" -iv "$iv" -d -in <(dd if="$input_file" bs=1 skip=120 2>/dev/null) >"$output_file"
+
+	else
+		# Raw data decryption mode
+		serialized_data="$data"
+
+		# Deserialize the serialized array
+		eval "$(echo "$serialized_data")"
+
+		# Extract values from the associative array
+		salt="${encryption_result["salt"]}"
+		iv="${encryption_result["iv"]}"
+		encrypted="${encryption_result["encrypted_data"]}"
+		hmac="${encryption_result["hmac"]}"
+		hmac_key="${encryption_result["hmac_key"]}"
+
+		# Derive the encryption key using Argon2
+		encoded_key=$(echo -n "$password" | argon2 "$salt" -id -t "$iter" -m 16 -p 2 -l 32 | grep -oP '(?<=Encoded:).*' | xargs)
+		base64_hash=$(echo "$encoded_key" | awk -F'$' '{print $NF}')
+
+		# Correct Base64 padding
+		padding=$(((4 - (${#base64_hash} % 4)) % 4))
+		base64_hash="${base64_hash}$(printf '=%.0s' $(seq 1 $padding))"
+
+		# Decode Base64-encoded hash into hexadecimal
+		key=$(echo "$base64_hash" | base64 -d | xxd -p -c 256)
+
+		# Validate the HMAC
+		calculated_hmac=$(echo -n "$encrypted" | openssl dgst -sha256 -mac HMAC -macopt hexkey:$hmac_key | awk '{print $2}')
+		if [[ "$calculated_hmac" != "$hmac" ]]; then
+			echo "Error: HMAC validation failed. Data integrity compromised."
+			return 1
+		fi
+
+		# Decrypt the raw data
+		decrypted=$(echo -n "$encrypted" | base64 -d | openssl enc -aes-256-cbc -K "$key" -iv "$iv" -d)
+
+		# Output the decrypted data
+		echo -n "$decrypted"
+	fi
+}
+```

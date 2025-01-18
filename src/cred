@@ -6,6 +6,42 @@
 # USE_NVIM="default"
 USE_EDITOR="nvim"
 
+# Function to calculate and print a concise size summary of kv_store with dynamic units
+calculate_kv_store_summary() {
+	local total_size=0
+	local total_entries=0
+
+	# Iterate through kv_store to calculate total size and entry count
+	for key in "${!kv_store[@]}"; do
+		if ignore_this_key "$key"; then
+			continue
+		fi
+		total_size=$((total_size + ${#key} + ${#kv_store[$key]}))
+		total_entries=$((total_entries + 1))
+	done
+
+	# Convert total size to a human-readable format
+	# TODO: Not sure this gets it right, size, or does it?
+	human_readable_size() {
+		local size=$1
+		if ((size < 1024)); then
+			echo "${size} B"
+		elif ((size < 1048576)); then
+			echo "$(bc <<<"scale=2; $size/1024") KB"
+		elif ((size < 1073741824)); then
+			echo "$(bc <<<"scale=2; $size/1048576") MB"
+		else
+			echo "$(bc <<<"scale=2; $size/1073741824") GB"
+		fi
+	}
+
+	# Get human-readable size
+	readable_size=$(human_readable_size $total_size)
+
+	# Print concise output
+	echo "(entries: $total_entries, size: $readable_size)"
+}
+
 allow_edit() {
 	local data_file="$1"
 	local data_file_is_remote="$2"
@@ -113,10 +149,15 @@ generate_metadata() {
 	echo "$iterations"
 	echo "last-modified"
 	echo "$timestamp"
+	if [[ -n "$4" ]]; then
+		echo "custom-crypto-version"
+		echo "$4"
+	fi
 	echo "encrypted-data"
 	echo "$encrypted_data"
 	echo "decryption-function"
 	echo "$decryption_function_in_base64"
+	# Include custom-crypto-version if provided
 }
 
 parse_metadata() {
@@ -236,7 +277,6 @@ calculate_decryption_time_for_given_iter() {
 		echo "(Using default encryption for testing.)"
 
 	fi
-	echo "Estemating processing time for new iteration number..."
 	# Find a suitable test_iter that takes ~1 second
 	while (($(echo "$elapsed_time < 1" | bc -l))); do
 		start_time=$(date +%s.%N)
@@ -252,7 +292,6 @@ calculate_decryption_time_for_given_iter() {
 
 		end_time=$(date +%s.%N)
 		elapsed_time=$(echo "$end_time - $start_time" | bc -l)
-		echo "Test Iterations: $test_iter, Elapsed Time: ${elapsed_time}s"
 
 		# Double the test_iter for the next iteration if elapsed_time < 1 second
 		if (($(echo "$elapsed_time < 1" | bc -l))); then
@@ -260,7 +299,7 @@ calculate_decryption_time_for_given_iter() {
 		fi
 	done
 
-	echo "Found suitable test_iter: $test_iter (Elapsed Time: ${elapsed_time}s)"
+	#echo "Found suitable test_iter: $test_iter (Elapsed Time: ${elapsed_time}s)"
 
 	# Extrapolate the time for the given_iter
 	estimated_time=$(echo "$elapsed_time * $given_iter / $test_iter" | bc -l)
@@ -287,6 +326,7 @@ generate_password() {
 
 	echo "$password"
 }
+
 # Add this function for executing and evaluating the content of a key
 execute_key() {
 	local key="$1"
@@ -298,7 +338,6 @@ execute_key() {
 	# Check if the key exists in the kv_store
 	if [[ -n "${kv_store[$key]}" ]]; then
 		local script="${kv_store[$key]}"
-
 		# Replace metasyntax {{key_name}} with corresponding kv_store values
 		while [[ "$script" =~ \{\{([a-zA-Z0-9:._-]+)\}\} ]]; do
 			local placeholder="${BASH_REMATCH[0]}"
@@ -307,24 +346,14 @@ execute_key() {
 			# Get the value of the referenced key
 			local value="${kv_store[$key_name]}"
 			if [[ -z "$value" ]]; then
-				echo "Error: Key '$key_name' not found for placeholder $placeholder."
-				return 1
+				# the placeholder doesn't exist as key in kv_store, but may in opt_store below
+				local value="${opt_store[$key_name]}"
+				if [[ -z "$value" ]]; then
+					echo "Error: Key '$key_name' found neither in kv_store nor opt_store for placeholder $placeholder."
+					return 1
+				fi
 			fi
 
-			# Replace the placeholder in the script
-			script="${script//$placeholder/$value}"
-		done
-		# Replace metasyntax {{key_name}} with corresponding opt_store values
-		while [[ "$script" =~ \{\{([a-zA-Z0-9:._-]+)\}\} ]]; do
-			local placeholder="${BASH_REMATCH[0]}"
-			local key_name="${BASH_REMATCH[1]}"
-
-			# Get the value of the referenced key
-			local value="${opt_store[$key_name]}"
-			if [[ -z "$value" ]]; then
-				echo "Error (opt): Key '$key_name' not found for placeholder $placeholder."
-				return 1
-			fi
 			# Replace the placeholder in the script
 			script="${script//$placeholder/$value}"
 		done
@@ -342,6 +371,18 @@ execute_key() {
 			export "$export_name=${kv_store[$key]}"
 
 		done
+
+		# NOTE: For consistency, __write should be accessible here too
+		# NOTE: __write key doesnt hold a function anyway, perhaps it should for consistency
+		# Make sure we can access the custom encryption functions
+		if [[ -n "${kv_store["__ced"]}" ]]; then
+			# Evaluate the function definition
+			eval "${kv_store["__ced"]}"
+		fi
+		if [[ -n "${kv_store["__ced"]}" ]]; then
+			# Evaluate the function definition
+			eval "${kv_store["__cdd"]}"
+		fi
 
 		# Execute the final script
 		#echo "Executing content of key: $key"
@@ -411,6 +452,7 @@ print_help_key() {
 	echo -ne $' \e[35m(\e[0m\e[97ms\e[0m\e[35m)\e[0m set key\n'
 	echo -ne $' \e[35m(\e[0m\e[97mu\e[0m\e[35m)\e[0m unset key\n'
 	echo -ne $' \e[35m(\e[0m\e[97me\e[0m\e[35m)\e[0m edit key\'s value\n'
+	echo -ne $' \e[35m(\e[0m\e[97ma\e[0m\e[35m)\e[0m absorb file into key\'s\n'
 	echo -ne $' \e[35m(\e[0m\e[97mr\e[0m\e[35m)\e[0m rename key\n'
 	echo -ne $' \e[35m(\e[0m\e[97my\e[0m\e[35m)\e[0m yank key to clipboard\n'
 	echo -ne $' \e[35m(\e[0m\e[97mg\e[0m\e[35m)\e[0m generate password for key\n'
@@ -432,8 +474,12 @@ print_help() {
 	echo -ne $' \e[35m(\e[0m\e[97mi\e[0m\e[35m)\e[0m iterations ['"$iterations"'] change\n'
 	echo -ne $' \e[35m(\e[0m\e[97mp\e[0m\e[35m)\e[0m password change\n'
 	echo -ne $' \e[35m(\e[0m\e[97mw\e[0m\e[35m)\e[0m write vault to disk\n'
+	echo -ne $' \e[35m(\e[0m\e[97m:\e[0m\e[35m)\e[0m command mode\n'
+	echo -ne $' \e[35m(\e[0m\e[97mt\e[0m\e[35m)\e[0m test custom crypto functions\n'
 	echo -ne $'\e[90m──────────────────── Interface ──────────────────\e[0m\n'
-	echo -ne $' \e[35m(\e[0m\e[97mm\e[0m\e[35m)\e[0m enter key-marking mode\n'
+	echo -ne $' \e[35m(\e[0m\e[97mm\e[0m\e[35m)\e[0m selecte marked key (enter key-marking mode)\n'
+	echo -ne $' \e[35m(\e[0m\e[97mM\e[0m\e[35m)\e[0m toggle key-marking mode\n'
+	echo -ne $' \e[35m(\e[0m\e[97mn\e[0m\e[35m)\e[0m cycle previous/current marked key\n'
 	echo -ne $' \e[35m(\e[0m\e[97mm\e[0m\e[35m)\e[0m exit key-marking mode\n'
 	echo -ne $' \e[35m(\e[0m\e[97m?\e[0m\e[35m)\e[0m help\n'
 	echo -ne $' \e[35m(\e[0m\e[97mI\e[0m\e[35m)\e[0m additional info\n'
@@ -461,41 +507,93 @@ mark_mode() {
 	local -a menu_options
 	local selected_key
 
-	# Get terminal dimensions
-	local term_height=$(tput lines)
-	local term_width=$(tput cols)
+	# Check if fzf is installed
+	if command -v fzf >/dev/null 2>&1; then
+		# Define colors (ANSI escape codes)
+		local key_color_normal="\e[93m"  # Bright Yellow for normal keys
+		local key_color_special="\e[37m" # White for keys with "__"
+		local desc_color="\e[90m"        # Gray for descriptions
+		local reset_color="\e[0m"
 
-	# Populate menu options with kv_store keys and descriptions
-	for key in "${!kv_store[@]}"; do
-		# Extract the first 40 characters of the key's value, ignoring newlines
-		local description=$(echo -n "${kv_store[$key]}" | tr -d '\n' | cut -c1-40)
-		menu_options+=("$key" "$description")
-	done
+		# Calculate the maximum key length for alignment
+		local max_key_length=0
+		for key in "${!kv_store[@]}"; do
+			[[ ${#key} -gt $max_key_length ]] && max_key_length=${#key}
+		done
 
-	# Use dialog to display the menu in full screen
-	selected_key=$(dialog --title "Mark Mode" \
-		--menu "Select a key to mark:" "$term_height" "$term_width" 15 \
-		"${menu_options[@]}" 2>&1 >/dev/tty)
+		# Sort keys alphabetically
+		mapfile -t sorted_keys < <(printf '%s\n' "${!kv_store[@]}" | sort)
 
-	# Check if a key was selected
-	if [[ -n "$selected_key" ]]; then
-		marked_key="$selected_key"
-		clear
+		# Populate menu options with aligned and colored columns
+		for key in "${sorted_keys[@]}"; do
+			if ignore_this_key "$key"; then
+				continue
+			fi
 
-		echo -e "\e[92mMarked key: $marked_key\e[0m"
-		print_help_key
+			# Extract the first 40 characters of the key's value, removing newlines
+			local description=$(echo -n "${kv_store[$key]}" | tr -d '\n' | cut -c1-40)
+
+			# Align the key by padding with spaces
+			local padded_key=$(printf "%-${max_key_length}s" "$key")
+
+			# Apply color based on key pattern
+			if [[ "$key" == *__* ]]; then
+				# Keys with "__" -> White
+				menu_options+=("$(echo -e "${key_color_special}${padded_key}${reset_color}"$'\t'"${desc_color}${description}${reset_color}")")
+			else
+				# Other keys -> Bright Yellow
+				menu_options+=("$(echo -e "${key_color_normal}${padded_key}${reset_color}"$'\t'"${desc_color}${description}${reset_color}")")
+			fi
+		done
+
+		# Use fzf to display aligned and colored columns
+		selected_key=$(printf '%s\n' "${menu_options[@]}" |
+			fzf --prompt="Select a key to mark: " \
+				--ansi \
+				--delimiter=$'\t' \
+				--with-nth=1,2 \
+				--nth=1 \
+				--no-sort \
+				--exact |
+			sed -E "s/\x1b\[[0-9;]*m//g" | cut -f1 | xargs) # Remove ANSI color codes and trailing whitespace
+		echo -n "$selected_key"
 	else
-		echo -e "\e[93mNo key selected. Mark mode cancelled.\e[0m"
-		clear
+		# Fallback to dialog if fzf is not installed
+
+		# Get terminal dimensions
+		local term_height=$(tput lines)
+		local term_width=$(tput cols)
+
+		# Sort keys alphabetically
+		mapfile -t sorted_keys < <(printf '%s\n' "${!kv_store[@]}" | sort)
+
+		# Populate menu options for dialog
+		for key in "${sorted_keys[@]}"; do
+			if ignore_this_key "$key"; then
+				continue
+			fi
+
+			# Extract the first 40 characters of the key's value, removing newlines
+			local description=$(echo -n "${kv_store[$key]}" | tr -d '\n' | cut -c1-40)
+			menu_options+=("$key" "$description")
+		done
+
+		# Use dialog to display the menu in full screen
+		selected_key=$(dialog --title "Mark Mode" \
+			--menu "Select a key to mark:" "$term_height" "$term_width" 15 \
+			"${menu_options[@]}" 2>&1 >/dev/tty)
 	fi
+
 }
+
 # Function to add a history entry for a key
 add_history_entry() {
 	local key="$1"
+	local data="${2:-${kv_store[$key]}}" # Use provided data or default to kv_store value
 
-	# Ensure the key exists in kv_store
-	if [[ -z "$key" || ! -v kv_store["$key"] ]]; then
-		echo -e "\e[91mError: Key '$key' does not exist in kv_store.\e[0m"
+	# Ensure the key exists in kv_store if data is not explicitly provided
+	if [[ -z "$key" || (-z "$2" && ! -v kv_store["$key"]) ]]; then
+		echo -e "\e[91mError: Key '$key' does not exist in kv_store, and no data was provided.\e[0m"
 		return 1
 	fi
 
@@ -516,14 +614,15 @@ add_history_entry() {
 	# Create the new history key
 	local history_key="__hst_${count}_${key}"
 
-	# Prepend the timestamp to the original value and store it in the new history key
-	kv_store["$history_key"]="${timestamp} ${kv_store[$key]}"
+	# Prepend the timestamp to the provided or existing value and store it in the new history key
+	kv_store["$history_key"]="${timestamp} ${data}"
 
 	# Update the count in the special key
 	kv_store["$history_count_key"]="$count"
 
 	#echo -e "\e[92mHistory entry added: $history_key\e[0m"
 }
+
 # Function to list all history entries for a given key
 # Function to list all history entries for a given key
 list_history_entries() {
@@ -597,7 +696,7 @@ write_recent_global_history() {
 
 	# Validate input
 	if [[ -z "$entry" ]]; then
-		echo -e "\e[91mRecent global history: Error: Entry text is required.\e[0m"
+		echo -e "Recent global history: Error: Entry text is required."
 		return 1
 	fi
 
@@ -614,8 +713,8 @@ print_recent_global_history() {
 		return 0
 	fi
 
-	echo -e "\e[96mRecent Global History:\e[0m"
-	echo -e "\e[90m----------------------\e[0m"
+	echo -e "Recent Global History:"
+	echo -e "----------------------"
 
 	for line in "${recent_global_history[@]}"; do
 		# Extract the timestamp, key type, and operation
@@ -744,10 +843,348 @@ ignore_this_key() {
 	# Check if the key matches the __hst_* pattern
 	if [[ "$key" =~ ^__hst_ ]]; then
 		return 0 # True (key should be ignored)
+
+	fi
+	return 1
+	if [[ "$key" =~ ^__marked_ ]]; then
+		return 0 # True (key should be ignored)
+
 	fi
 
 	return 1 # False (key should not be ignored)
 }
+
+absorb_file_into_key() {
+	echo -e $'\e[95mAbsorb File into Key\e[0m'
+
+	# Prompt for the key name
+
+	if ! is_marked_key_mode_active; then
+		read -rp $'\e[96mEnter key name to store file content: \e[0m' key
+	else
+		key="$(marked_key_selected)"
+	fi
+
+	# Validate the key
+	if [[ -z "$key" ]]; then
+		echo -e "Error: Key cannot be empty."
+		return
+	elif [[ ! "$key" =~ ^[a-zA-Z0-9:._-]+$ ]]; then
+		echo -e "Error: Invalid key name. Only letters, numbers, dots, dashes, colons, and underscores are allowed."
+		return
+	fi
+
+	# Show the current working directory and prompt for the file path
+	echo -e "Current Directory: $(pwd)"
+	read -rp $'\e[96mEnter the file path to absorb: \e[0m' file_path
+
+	# Expand the file path to handle relative paths and symlinks
+	file_path=$(realpath -e "$file_path")
+
+	# Check if the file exists
+	if [[ ! -f "$file_path" ]]; then
+		echo -e "Error: File does not exist at path: $file_path"
+		return
+	fi
+
+	# Read the file content
+	file_content=$(<"$file_path")
+
+	# Save the previous content if key exists
+	# Save the diff with the previous content if key exists
+	if key_exists_in_kv_store "$key"; then
+		# Compute the diff between the existing and new content
+		diff_output=$(diff <(echo -n "${kv_store[$key]}") <(echo -n "$file_content"))
+
+		# If there's a difference, save it in the history
+		if [[ -n "$diff_output" ]]; then
+			add_history_entry "$key" "$diff_output"
+
+		fi
+	fi
+
+	# Store file content in the kv_store
+	kv_store["$key"]="$file_content"
+
+	# Log the operation
+	bytes_written=$(wc -c <"$file_path")
+	write_global_history "$key" "absorbed file '$file_path' ($bytes_written bytes)"
+	unsaved_changes=1
+
+	echo -e "\e[92mFile '$file_path' absorbed into key '$key'.\e[0m"
+}
+
+test_custom_crypto_functions_to_make_sure_they_work() {
+	# Check if __ced and __cdd are set in kv_store
+
+	if [[ -z "${kv_store["__ced"]}" || -z "${kv_store["__cdd"]}" ]]; then
+		echo "Error: Custom encryption and decryption functions are not set. Both or none are missing."
+		return 1
+	fi
+
+	custom_encrypt_data="${kv_store["__ced"]}"
+	custom_decrypt_data="${kv_store["__cdd"]}"
+
+	# Check syntax for the encryption command
+	if ! bash -n <<<"$custom_encrypt_data"; then
+		echo "Syntax Error: Encryption command has invalid syntax."
+		return 1
+	fi
+
+	# NOTE: the eval here should succeed given syntax is correct, because it is just a functoin definition in custom_*_data
+	# Execute the encryption command
+	eval "$custom_encrypt_data"
+	if [[ $? -ne 0 ]]; then
+		echo "Runtime Error: Encryption command failed."
+		return 1
+	fi
+
+	# Check syntax for the decryption command
+	if ! bash -n <<<"$custom_decrypt_data"; then
+		echo "Syntax Error: Decryption command has invalid syntax."
+		return 1
+	fi
+
+	# Execute the decryption command
+	eval "$custom_decrypt_data"
+	if [[ $? -ne 0 ]]; then
+		echo "Runtime Error: Decryption command failed."
+		return 1
+	fi
+
+	# Directly check if both functions are defined
+	if ! declare -f "custom_encrypt_data" >/dev/null; then
+		echo "Error: Function 'custom_encrypt_data' is NOT defined."
+		return 1
+	fi
+
+	if ! declare -f "custom_decrypt_data" >/dev/null; then
+		echo "Error: Function 'custom_decrypt_data' is NOT defined."
+		return 1
+	fi
+
+	# Do a simple encryption test
+	local test_data="test data"
+	local pwd="the_password"
+	enc_data=$(custom_encrypt_data "$test_data" "$pwd" "2")
+	dec_data=$(custom_decrypt_data "$enc_data" "$pwd" "2")
+	# Check if the decrypted data matches the original test data
+	if [[ "$dec_data" != "$test_data" ]]; then
+		return 1
+
+	else
+		return 0
+	fi
+}
+dump_kv_store_to_dir() {
+	local target_dir
+	local dump_dir
+	local sanitized_key
+	local invalid_chars='[^a-zA-Z0-9._-]'
+
+	# Prompt for directory, default to current directory
+	read -rp "Enter target directory to dump kv_store (default: $(pwd)): " target_dir
+	target_dir="${target_dir:-$(pwd)}"
+
+	# Define the dump directory as target_dir/cred-dump
+	dump_dir="$target_dir/cred-dump"
+
+	# Check if the dump directory exists, if not create it
+	if [[ ! -d "$dump_dir" ]]; then
+		echo "Creating dump directory: $dump_dir"
+		mkdir -p "$dump_dir" || {
+			echo "Failed to create dump directory. Exiting."
+			return 1
+		}
+	fi
+
+	# Iterate through kv_store and create files for each key
+	for key in "${!kv_store[@]}"; do
+		# Skip ignored keys (like history keys)
+		if ignore_this_key "$key"; then
+			continue
+		fi
+
+		# Sanitize key to make it a valid filename
+		sanitized_key=$(echo "$key" | sed -E "s/$invalid_chars/_/g")
+
+		# Write the value to the file in the dump directory
+		echo -n "${kv_store[$key]}" >"$dump_dir/$sanitized_key"
+
+		echo "Dumped key '$key' to '$dump_dir/$sanitized_key'"
+	done
+
+	echo "Dump complete. All keys have been saved to: $dump_dir"
+}
+
+# Deserialize marked keys from kv_store
+# Deserialize marked keys from kv_store
+# Deserialize marked keys from kv_store (defaults to space delimiter)
+deserialize_marked_keys() {
+	read -ra marked_keys <<<"${kv_store[__marked_key_all]}"
+}
+
+# Serialize marked keys back into kv_store (defaults to space delimiter)
+serialize_marked_keys() {
+	kv_store[__marked_key_all]="${marked_keys[*]}"
+}
+
+# Return all marked keys except the provided key
+
+marked_keys_exclude() {
+	local exclude_key="$1"
+	deserialize_marked_keys
+
+	for key in "${marked_keys[@]}"; do
+		if [[ "$key" != "$exclude_key" ]]; then
+			echo "$key"
+		fi
+	done
+}
+# Set the provided key as the currently selected marked key
+marked_key_set_selected() {
+	local target_key="$1"
+	# Trim trailing newline characters
+	target_key="${target_key//$'\n'/}"
+
+	deserialize_marked_keys
+
+	for i in "${!marked_keys[@]}"; do
+		if [[ "${marked_keys[$i]}" == "$target_key" ]]; then
+			kv_store[__marked_key_pos]="$i"
+			return 0 # Success
+		fi
+	done
+
+	echo "Key '$target_key' is not marked."
+	return 1 # Failure
+}
+
+# Add a key to the marked list
+marked_key_add() {
+	local key="$1"
+	deserialize_marked_keys
+
+	# Trim trailing newline characters
+	key="${key//$'\n'/}"
+
+	# Add only if the key isn't already marked
+	for existing_key in "${marked_keys[@]}"; do
+		if [[ "$existing_key" == "$key" ]]; then
+			return 0 # Key already exists, no need to add
+		fi
+	done
+
+	# Add the key if it's not present
+	marked_keys+=("$key")
+	serialize_marked_keys
+	echo "added key $key"
+	# If this is the first key, mark it as active
+	if [[ -z "${kv_store[__marked_key_pos]}" ]]; then
+		kv_store[__marked_key_pos]=0
+	fi
+}
+
+# Remove a key from the marked list
+marked_key_remove() {
+	local key="$1"
+	deserialize_marked_keys
+
+	for i in "${!marked_keys[@]}"; do
+		if [[ "${marked_keys[$i]}" == "$key" ]]; then
+			unset 'marked_keys[i]'
+			marked_keys=("${marked_keys[@]}") # Reindex the array
+			serialize_marked_keys
+
+			# Adjust the position if needed
+			if [[ "${kv_store[__marked_key_pos]}" -ge "${#marked_keys[@]}" ]]; then
+				kv_store[__marked_key_pos]=$((${#marked_keys[@]} - 1))
+			fi
+
+			# Clear position if the array is empty
+			if [[ "${#marked_keys[@]}" -eq 0 ]]; then
+				unset kv_store[__marked_key_pos]
+			fi
+			break
+		fi
+	done
+}
+
+# Cycle to the next marked key
+marked_key_next() {
+	deserialize_marked_keys
+	local count=${#marked_keys[@]}
+	if ((count == 0)); then
+		echo "No marked keys."
+		return
+	fi
+
+	kv_store[__marked_key_pos]=$(((kv_store[__marked_key_pos] + 1) % count))
+}
+# Return the total number of marked keys
+marked_key_count() {
+	deserialize_marked_keys
+	echo "${#marked_keys[@]}"
+}
+
+# Cycle to the previous marked key
+marked_key_previous() {
+	deserialize_marked_keys
+	local count=${#marked_keys[@]}
+	if ((count == 0)); then
+		echo "No marked keys."
+		return
+	fi
+
+	kv_store[__marked_key_pos]=$(((kv_store[__marked_key_pos] - 1 + count) % count))
+}
+
+# Display all marked keys, highlighting the current one
+marked_key_all() {
+	deserialize_marked_keys
+	for i in "${!marked_keys[@]}"; do
+		if [[ "$i" -eq "${kv_store[__marked_key_pos]}" ]]; then
+			echo -e "[*] ${marked_keys[$i]}" # Highlight current key
+		else
+			echo "    ${marked_keys[$i]}"
+		fi
+	done
+}
+
+# Show the currently selected marked key
+marked_key_selected() {
+	deserialize_marked_keys
+	local pos="${kv_store[__marked_key_pos]}"
+	if [[ -n "${marked_keys[$pos]}" ]]; then
+		echo "${marked_keys[$pos]}"
+	else
+		echo "No marked key."
+	fi
+}
+
+is_marked_key_mode_active() {
+	# Check if marked key mode is enabled
+	if [[ "$is_marked_key_mode" -ne 1 ]]; then
+		return 1 # Marked key mode is OFF
+	fi
+
+	# Deserialize the marked keys
+	deserialize_marked_keys
+
+	# Check if the marked keys array is not empty
+	if [[ ${#marked_keys[@]} -eq 0 ]]; then
+		return 1 # No marked keys
+	fi
+
+	# Check if __marked_key_pos is set and points to a valid key
+	local pos="${kv_store[__marked_key_pos]}"
+	if [[ -n "$pos" ]] && [[ "$pos" =~ ^[0-9]+$ ]] && [[ "$pos" -lt ${#marked_keys[@]} ]]; then
+		return 0 # Active and valid position
+	else
+		return 1 # Invalid or unset position
+	fi
+}
+
 # Main function
 main() {
 	local data_file=""
@@ -765,7 +1202,9 @@ main() {
 	local metadata
 	local unsaved_changes=0
 	local last_confirmation
-	local marked_key=""
+	local is_marked_key_mode=0
+	local print_only_bottom_of_prompt=0
+	local marked_keys=()
 
 	# Argument parsing loop
 	while [[ "$1" ]]; do
@@ -897,11 +1336,14 @@ main() {
 
 		# Load data into the associative array
 		# TODO: Why declare it again?
-		declare -A kv_store
-		while IFS= read -r key && IFS= read -r value; do
-			decoded_value=$(echo -n "$value" | base64 -d)
-			kv_store["$key"]="$decoded_value"
-		done <<<"$decrypted_data"
+		#		declare -A kv_store
+		#		while IFS= read -r key && IFS= read -r value; do
+		#			decoded_value=$(echo -n "$value" | base64 -d)
+		#			kv_store["$key"]="$decoded_value"
+		#		done <<<"$decrypted_data"
+
+		# Restore kv_store
+		eval "$decrypted_data"
 
 		# Call the extract_keys function with the loaded kv_store
 		extract_keys "$extract_key"
@@ -992,13 +1434,16 @@ main() {
 		fi
 
 		# Load data into the associative array
-		while IFS= read -r key && IFS= read -r value; do
-			# Decode the base64-encoded value
-			decoded_value=$(echo -n "$value" | base64 -d)
+		#		while IFS= read -r key && IFS= read -r value; do
+		#			# Decode the base64-encoded value
+		#			decoded_value=$(echo -n "$value" | base64 -d)
+		#
+		#			# Store the key and decoded value in kv_store
+		#			kv_store["$key"]="$decoded_value"
+		#		done <<<"$decrypted_data"
 
-			# Store the key and decoded value in kv_store
-			kv_store["$key"]="$decoded_value"
-		done <<<"$decrypted_data"
+		# Restore kv_store
+		eval "$decrypted_data"
 
 	else
 		echo "No file found. Use -n to create a new vault."
@@ -1028,32 +1473,125 @@ main() {
 			echo
 			last_confirmation=""
 		fi
-		## The prompt
-		if [[ -n "$marked_key" ]]; then
-			# Get the number of entries in recent_global_history
-			count="${#recent_global_history[@]}"
+		vault_stats=$(calculate_kv_store_summary)
+		if [[ $print_only_bottom_of_prompt -eq 0 ]]; then
 
-			# Determine the color based on the count
-			if [[ "$count" -eq 0 ]]; then
-				color="\e[92m" # Green for 0
+			#### Styling the filepath
+			MAGENTA='\033[95m' # Bright magenta
+			BLUE='\033[94m'    # Bright blue
+			RESET='\033[0m'
+
+			# 1) Detect if the path starts with http:// or https://
+			if [[ "$data_file" == http://* || "$data_file" == https://* ]]; then
+				# Extract the protocol (http:// or https://)
+				protocol="${data_file%%://*}://"
+				# Extract the remaining part of the URL
+				path="${data_file#*://}"
+
+				# Color the protocol in bright magenta
+				data_file_styled="${MAGENTA}${protocol}${RESET}"
+
+				# Reconstruct data_file for normal processing
+				data_file="$path"
 			else
-				color="\e[91m" # Red for non-zero
+				# If not a URL, process as is
+				data_file_styled=''
 			fi
 
-			echo -ne "$color($count)\e[0m "$'\e[96mmarked key \e[0m\e[93m'"${marked_key}"'\e[0m\e[96m> \e[0m'
-		else
-			# Get the number of entries in recent_global_history
-			count="${#recent_global_history[@]}"
+			# 2) Find the index of the last slash in the path
+			last_slash_idx=-1
+			for ((i = 0; i < ${#data_file}; i++)); do
+				char="${data_file:$i:1}"
+				if [[ "$char" == "/" ]]; then
+					last_slash_idx=$i
+				fi
+			done
 
-			# Determine the color based on the count
-			if [[ "$count" -eq 0 ]]; then
-				color="\e[92m" # Green for 0
-			else
-				color="\e[91m" # Red for non-zero
-			fi
+			# 3) Build the styled path character by character
+			for ((i = 0; i < ${#data_file}; i++)); do
+				char="${data_file:$i:1}"
 
-			echo -ne "$color($count)\e[0m "$'\e[96m> \e[0m'
+				if [[ "$char" == "/" ]]; then
+					# Color slashes in bright magenta
+					data_file_styled+="${MAGENTA}/${RESET}"
+				elif ((i > last_slash_idx)); then
+					# Color the filename in bright blue
+					data_file_styled+="${BLUE}${char}${RESET}"
+				else
+					# Keep normal characters
+					data_file_styled+="$char"
+				fi
+			done
+
+			# 4) Print the result in one line
+
+			##############
+			printf "┌─%b \033[90m%s\033[0m\n" "$data_file_styled" "$vault_stats"
+			# 3) Print, making sure escape codes are interpreted (%b)
+
+			for key in "${!opt_store[@]}"; do
+				# Check if the key starts with '__opt_' or '_opt_' and handle accordingly
+				if [[ "$key" == __opt_* ]]; then
+					# Double dash for '__opt_'
+					stripped_key="${key#__opt_}"
+					prefix="--"
+				elif [[ "$key" == _opt_* ]]; then
+					# Single dash for '_opt_'
+					stripped_key="${key#_opt_}"
+					prefix="-"
+				else
+					# No prefix change if it doesn't match
+					stripped_key="$key"
+					prefix=""
+				fi
+
+				# Replace remaining underscores with hyphens
+				formatted_key="${stripped_key//_/-}"
+
+				# Print with appropriate prefix
+				echo -e "├\e[90m  \e[0m${prefix}${formatted_key}\e[90m ${opt_store[$key]}\e[0m"
+			done
 		fi
+		#print the filename in magenta
+
+		## The prompt
+
+		# Get the number of entries in recent_global_history
+		hist_count="${#recent_global_history[@]}"
+		# Determine the color based on the count
+		if [[ "$hist_count" -eq 0 ]]; then
+			color="\e[92m" # Green for 0
+		else
+			color="\e[91m" # Red for non-zero
+		fi
+
+		if is_marked_key_mode_active; then
+
+			local current_key
+			current_key="$(marked_key_selected)"
+
+			# Get all other marked keys excluding the current one
+			local other_keys
+			other_keys="$(marked_keys_exclude "$current_key")"
+
+			# Build the display string
+			local display=""
+			for key in $other_keys; do
+				display+="\e[90m${key}\e[0m " # Dim other keys
+			done
+
+			# Highlight the current key in bright yellow
+			display+="\e[93m${current_key}\e[0m"
+			# Compose and print the prompt
+			echo -ne "└──$color($hist_count)\e[0m \e[96mkeys: [\e[0m $display \e[96m]\e[0m \e[96m> \e[0m"
+			#	echo -ne "└──$color($count)\e[0m "$'\e[96m(in marked key mode, but no marked key) > \e[0m'
+
+		else
+
+			echo -ne "└──$color($hist_count)\e[0m "$'\e[96m> \e[0m'
+		fi
+
+		print_only_bottom_of_prompt=0
 
 		##
 		read -n 1 -s command
@@ -1063,20 +1601,72 @@ main() {
 		'?')
 			print_help
 			;;
+		a)
+			absorb_file_into_key
+			;;
 		m)
-			mark_mode
+			# Mark mode returns 0 on success
+			selected_key="$(mark_mode)"
+			# Check if a key was selected
+			if [[ -n "$selected_key" ]]; then
+				# Add the key to the marked list first
+				marked_key_add "$selected_key"
+
+				# Set the selected key using the helper function
+				if marked_key_set_selected "$selected_key"; then
+					echo -e "\e[92mMarked key: $(marked_key_selected)\e[0m"
+					is_marked_key_mode=1
+					print_only_bottom_of_prompt=1
+
+					print_help_key
+				else
+					echo -e "Failed to select key '$selected_key'."
+				fi
+			else
+				echo -e "No key selected."
+			fi
+
+			continue
+			;;
+
+		M)
+			# Toggle marked key mode
+			if [[ "$is_marked_key_mode" -eq 1 ]]; then
+				last_confirmation=$'\e[92mExited key-marking mode\e[0m'
+				is_marked_key_mode=0
+			else
+				last_confirmation=$'\e[92mEntered key-marking mode\e[0m'
+				is_marked_key_mode=1
+			fi
+			print_only_bottom_of_prompt=1
+			continue
+
 			;;
 		n)
-			last_confirmation=$'\e[92mExited key-marking mode for \''"$marked_key"$'\'.\e[0m'
-			marked_key=""
+			# Cycle/Toggle to previous marked key
+			marked_key_next
+
+			print_only_bottom_of_prompt=1
+			;;
+		N)
+			# Cycle/Toggle to previous marked key
+			marked_key_previous
+
+			print_only_bottom_of_prompt=1
+			;;
+
+		,)
+			marked_key_remove "$(marked_key_selected)"
 			;;
 		':')
 			echo -e $'\e[91mCommand Mode\e[0m'
 
 			while true; do
 				echo -e "\n\e[91mAvailable commands:\e[0m"
+				echo -e " \e[91dump-key\e[0m - Dump all keys to a directory"
 				echo -e " \e[91merase-history-for-key\e[0m - Erase all history for a specific key"
 				echo -e " \e[91merase-history-for_all-keys\e[0m - Erase all history entries for all keys"
+				echo -e " \e[91msanitize-keys\e[0m - Change all '-' for '_' in key names like MY-KEY to MY_KEY"
 				echo -e " \e[91mq\e[0m - Quit command mode"
 
 				# Prompt for a command
@@ -1084,6 +1674,48 @@ main() {
 				read -r command
 
 				case "$command" in
+				dump-keys)
+					dump_kv_store_to_dir
+					;;
+				sanitize-keys)
+					echo -e "\e[95mSanitizing Keys (Replacing '-' with '_')\e[0m"
+
+					# Temporary associative array to hold sanitized keys
+					declare -A sanitized_kv_store
+
+					# Flag to check if any keys were changed
+					local keys_changed=0
+
+					# Loop through all keys in kv_store
+					for key in "${!kv_store[@]}"; do
+						# Replace '-' with '_'
+						sanitized_key="${key//-/_}"
+
+						# If the sanitized key is different, update the flag
+						if [[ "$key" != "$sanitized_key" ]]; then
+							keys_changed=1
+							echo -e "\e[93mRenamed:\e[0m '$key' -> '$sanitized_key'"
+						fi
+
+						# Store in the new sanitized_kv_store
+						sanitized_kv_store["$sanitized_key"]="${kv_store[$key]}"
+					done
+
+					# Replace the original kv_store with the sanitized version
+					kv_store=()
+					for key in "${!sanitized_kv_store[@]}"; do
+						kv_store["$key"]="${sanitized_kv_store[$key]}"
+					done
+
+					# If any keys were changed, log and set unsaved changes
+					if [[ $keys_changed -eq 1 ]]; then
+						write_global_history "[all]" "sanitized keys (replaced '-' with '_')"
+						unsaved_changes=1
+						echo -e "\e[92mSanitization complete.\e[0m"
+					else
+						echo -e "\e[93mNo keys required sanitization.\e[0m"
+					fi
+					;;
 				erase-history-for-key)
 					echo -ne "\e[91mEnter the key to erase all history for: \e[0m"
 					read -r key
@@ -1134,12 +1766,13 @@ main() {
 			;;
 
 		h)
-			#If marked_key is note set, read key
-			if [[ -z "$marked_key" ]]; then
+			#If is_marked_key_mode is note set, read key
+			if ! is_marked_key_mode_active; then
 				echo -ne "\e[96mEnter the key to list its history: \e[0m"
 				read -r key
 			else
-				key="$marked_key"
+				key="$(marked_key_selected)"
+
 			fi
 
 			if [[ -z "$key" ]]; then
@@ -1199,11 +1832,11 @@ main() {
 				continue
 			fi
 
-			if [[ -z "$marked_key" ]]; then
+			if ! is_marked_key_mode_active; then
 				# Prompt for key
 				read -rp $'\e[96mEnter key: \e[0m' key
 			else
-				key="$marked_key"
+				key="$(marked_key_selected)"
 			fi
 
 			# Validate the key
@@ -1254,10 +1887,11 @@ main() {
 				continue
 			fi
 
-			if [[ -z "$marked_key" ]]; then
+			if ! is_marked_key_mode_active; then
 				read -rp $'\e[96mEnter key to delete: \e[0m' key
 			else
-				key="$marked_key"
+				key="$(marked_key_selected)"
+
 			fi
 
 			if [[ -z "$key" ]]; then
@@ -1278,13 +1912,14 @@ main() {
 			;;
 		e) # New 'edit' option for editing a key-value pair
 			echo -e $'\e[95mEdit Key Value\e[0m'
-			if [[ -z "$marked_key" ]]; then
+			if ! is_marked_key_mode_active; then
 
 				# Prompt for key to edit
 				read -rp $'\e[96mEnter key to edit: \e[0m' key
 
 			else
-				key="$marked_key"
+				key="$(marked_key_selected)"
+
 			fi
 
 			if [[ -z "$key" ]]; then
@@ -1303,13 +1938,18 @@ main() {
 				temp_file=$(mktemp)
 
 				# Write the current value to the temporary file
-				echo -n "$current_value" >"$temp_file"
-
+				printf %s "$current_value" >"$temp_file"
 				# Open the temporary file in nvim
 				$USE_EDITOR "$temp_file"
+				temp_file_content=$(<"$temp_file")
 
-				# Check if the file was modified
-				if ! cmp -s <(echo -n "$current_value") "$temp_file"; then
+				# Trim temp_file and current_value end to remove newlines
+				# NOTE: 1 newline is adedd by for example Neovim as by POSIX standard, but the user may have formatters etc that add more
+				# Thus trim all newlines from the end before compare to check for changes
+				current_value_trim=$(printf "%s" "$current_value" | awk '{ sub(/\n+$/, ""); print }')
+				temp_file_content_trim=$(printf "%s" "$temp_file_content" | awk '{ sub(/\n+$/, ""); print }')
+
+				if [[ "$current_value_trim" != "$temp_file_content_trim" ]]; then
 					# File was modified, update the edited value
 					edited_value=$(cat "$temp_file")
 					did_update_content=1
@@ -1334,8 +1974,13 @@ main() {
 					last_confirmation="Disabled: No edit allowed as file is remote and no support to save it back exists."
 					continue
 				fi
+				# Use `diff` to compare the old and new values and save that to history
+				old_value="${kv_store[$key]}"
 
-				add_history_entry "$key"
+				# Create a diff between old and new values
+				diff_output=$(diff <(echo "$old_value") <(echo "$edited_value"))
+
+				add_history_entry "$key" "$diff_output"
 				kv_store["$key"]="$edited_value"
 
 				bytes_written=$(echo -n "$edited_value" | wc -c)
@@ -1402,11 +2047,11 @@ main() {
 			#			;;
 		y)
 			echo -e $'\e[95mYank Key to Clipboard\e[0m'
-			if [[ -z "$marked_key" ]]; then
+			if ! is_marked_key_mode_active; then
 
 				read -rp $'\e[96mEnter key to yank: \e[0m' key
 			else
-				key="$marked_key"
+				key="$(marked_key_selected)"
 			fi
 			if [[ -n "${kv_store[$key]}" ]]; then
 				# Copy the value of the specified key to the clipboard using xsel
@@ -1424,11 +2069,11 @@ main() {
 				continue
 			fi
 
-			if [[ -z "$marked_key" ]]; then
+			if ! is_marked_key_mode_active; then
 				# Prompt for the current (target) key to rename
 				read -rp $'\e[96mEnter the key to rename: \e[0m' old_key
 			else
-				old_key="$marked_key"
+				old_key="${kv_store["__marked_key"]}"
 			fi
 			# Check if the old key exists
 			if [[ -z "$old_key" ]]; then
@@ -1472,6 +2117,16 @@ main() {
 			unsaved_changes=1
 			last_confirmation=$'\e[92mKey \''"$old_key"$'\'renamed successfully to \''"$new_key"$'\'.\e[0m'
 			;;
+		t)
+			test_custom_crypto_functions_to_make_sure_they_work
+			if [[ $? -eq 0 ]]; then
+				# Print success message in green
+				echo -e "\033[92m[SUCCESS]\033[0m Custom encryption and decryption work correctly."
+			else
+				# Print bright red error message
+				echo -e "\033[91m[ERROR]\033[0m Custom decrypted test data does not match the original!"
+			fi
+			;;
 		w)
 			if ! allow_edit "$data_file" "$data_file_is_remote"; then
 				echo -e $'\e[95mWrite data to file\e[0m'
@@ -1484,6 +2139,36 @@ main() {
 				continue
 			fi
 
+			# NOTE: Before anything, we need to ensure that the custom crypto functions work, or we may be locked out
+
+			# Make sure not just one exists, the custom crypto functions
+			if [[ -n "${kv_store["__ced"]}" || -n "${kv_store["__cdd"]}" ]]; then
+
+				if [[ -n "${kv_store["__ced"]}" && -n "${kv_store["__cdd"]}" ]]; then
+					echo "Making sure custom crypto functions work"
+					# Both are set, so we have custom crypto functions
+					test_custom_crypto_functions_to_make_sure_they_work
+					if [[ $? -eq 0 ]]; then
+						# Print success message in green
+						echo -e "\033[92m[SUCCESS]\033[0m Custom encryption and decryption work correctly."
+					else
+						# Print bright red error message
+						echo -e "\033[91m[ERROR]\033[0m Custom decrypted test data does not match the original!"
+						last_confirmation="Aborting write. Error: Custom crypto functions do not work correctly."
+						confintue
+					fi
+					:
+				else
+					echo "Either __ced or __cdd is unset or empty in kv_store"
+					last_confirmation="Error: only one of __ced and __cdd are set. Both or none must be set."
+					continue
+				fi
+			else
+				# None of them are set, so we do not have custom crypto functions
+				:
+
+			fi
+
 			# NOTE: We need history record written before save, to get it into the saved file
 			# But what if the write fails, then just remove the last history entry
 			num_entries=${#kv_store[@]}
@@ -1491,15 +2176,20 @@ main() {
 
 			#echo -e $'\e[95mWrite Vault to Disk\e[0m'
 			# Combine all key-value pairs into a single string using actual newlines
-			combined_data=""
-			for k in "${!kv_store[@]}"; do
-				# Append the key as-is
-				combined_data+="$k"$'\n'
 
-				# Base64-encode the value and append it
-				encoded_value=$(echo -n "${kv_store[$k]}" | base64 -w 0)
-				combined_data+="$encoded_value"$'\n'
-			done
+			# Serialize kv_store to save it to the file further down
+			combined_data=$(declare -p kv_store)
+
+			# This approach uses base64, but if we serialze the data as above, we wont need base64
+			#			combined_data=""
+			#			for k in "${!kv_store[@]}"; do
+			#				# Append the key as-is
+			#				combined_data+="$k"$'\n'
+			#
+			#				# Base64-encode the value and append it
+			#				encoded_value=$(echo -n "${kv_store[$k]}" | base64 -w 0)
+			#				combined_data+="$encoded_value"$'\n'
+			#			done
 
 			# Encrypt the combined string
 			#if __custom_encrypt_data exist in kv store, eval its value and call that function for encryption
@@ -1542,8 +2232,12 @@ main() {
 					# User has defined function knowing how to write back to the remote storage
 					kv_store["__data_file_path"]="$data_file"
 					kv_store["__data_file_name"]=$(basename $data_file)
-
-					generated_metadata=$(generate_metadata "$encrypted_data" "$iterations", "$decrypt_func_in_base64_format")
+					#if custom_crypto_version exist in kv store,
+					if [[ -n "${kv_store["__ccv"]}" ]]; then
+						generated_metadata=$(generate_metadata "$encrypted_data" "$iterations" "$decrypt_func_in_base64_format" "${kv_store["__ccv"]}")
+					else
+						generated_metadata=$(generate_metadata "$encrypted_data" "$iterations" "$decrypt_func_in_base64_format")
+					fi
 					bytes_written=$(echo -n "$generated_metadata" | wc -c)
 					kv_store["__data_file_content"]="$generated_metadata"
 					# NOTE: We do not check for return state, like what did the eval return... we just assume it succeeded and confirm as if
@@ -1565,7 +2259,11 @@ main() {
 				fi
 
 			else
-				generate_metadata "$encrypted_data" "$iterations" "$decrypt_func_in_base64_format" >"$data_file"
+				if [[ -n "${kv_store["__ccv"]}" ]]; then
+					generate_metadata "$encrypted_data" "$iterations" "$decrypt_func_in_base64_format" "${kv_store["__ccv"]}" >"$data_file"
+				else
+					generate_metadata "$encrypted_data" "$iterations" "$decrypt_func_in_base64_format" >"$data_file"
+				fi
 
 			fi
 
@@ -1613,9 +2311,9 @@ main() {
 
 				write_global_history "iterations changed from $iterations to $new_iterations"
 				iterations="$new_iterations"
-				iter_est_text=$(calculate_decryption_time_for_given_iter "$iterations")
+				calculate_decryption_time_for_given_iter "$iterations"
 				unsaved_changes=1
-				last_confirmation=$'\e[92mIterations updated to '"$iterations"$'.\e[0m '"$iter_est_text"
+				last_confirmation=$'\e[92mIterations updated to '"$iterations"$'.\e[0m '
 			else
 				last_confirmation="Error: Iteration count must be a positive integer."
 			fi
@@ -1649,10 +2347,11 @@ main() {
 				continue
 			fi
 			# Prompt for key
-			if [[ -z "$marked_key" ]]; then
+			if ! is_marked_key_mode_active; then
 				read -rp $'\e[96mEnter key name: \e[0m' key
 			else
-				key="$marked_key"
+				key="$(marked_key_selected)"
+
 			fi
 
 			# Validate the key
@@ -1691,10 +2390,11 @@ main() {
 			;;
 		x)
 			echo -e $'\e[95mExecute Key Content\e[0m'
-			if [[ -z "$marked_key" ]]; then
+			if ! is_marked_key_mode_active; then
 				read -rp $'\e[96mEnter key to execute: \e[0m' key
 			else
-				key="$marked_key"
+				key="$(marked_key_selected)"
+
 			fi
 			execute_key "$key"
 			;;
@@ -1741,10 +2441,10 @@ main() {
 			echo -e $'\e[95mView Key Content\e[0m'
 
 			# Prompt for the key to view if no marked key is set
-			if [[ -z "$marked_key" ]]; then
+			if ! is_marked_key_mode_active; then
 				read -rp $'\e[96mEnter key to view: \e[0m' key
 			else
-				key="$marked_key"
+				key="$(marked_key_selected)"
 			fi
 
 			# Validate the key
@@ -1772,11 +2472,11 @@ main() {
 		b)
 			echo -e $'\e[95mToggle Base64 Encode/Decode\e[0m'
 
-			if [[ -z "$marked_key" ]]; then
+			if ! is_marked_key_mode_active; then
 				# Prompt for the key
 				read -rp $'\e[96mEnter key to toggle base64 for: \e[0m' key
 			else
-				key="$marked_key"
+				key="$(marked_key_selected)"
 			fi
 			# Check if the key exists
 			if [[ -z "$key" ]]; then
