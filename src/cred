@@ -1475,6 +1475,7 @@ main() {
 			last_confirmation=""
 		fi
 		vault_stats=$(calculate_kv_store_summary)
+		data_file_original="$data_file"
 		if [[ $print_only_bottom_of_prompt -eq 0 ]]; then
 
 			#### Styling the filepath
@@ -1553,6 +1554,7 @@ main() {
 				echo -e "├\e[90m  \e[0m${prefix}${formatted_key}\e[90m ${opt_store[$key]}\e[0m"
 			done
 		fi
+		data_file="$data_file_original"
 		#print the filename in magenta
 
 		## The prompt
@@ -1664,7 +1666,7 @@ main() {
 
 			while true; do
 				echo -e "\n\e[91mAvailable commands:\e[0m"
-				echo -e " \e[91dump-key\e[0m - Dump all keys to a directory"
+				echo -e " \e[91mdump-key\e[0m - Dump all keys to a directory"
 				echo -e " \e[91merase-history-for-key\e[0m - Erase all history for a specific key"
 				echo -e " \e[91merase-history-for_all-keys\e[0m - Erase all history entries for all keys"
 				echo -e " \e[91msanitize-keys\e[0m - Change all '-' for '_' in key names like MY-KEY to MY_KEY"
@@ -2248,6 +2250,7 @@ main() {
 					unset kv_store["__data_file_name"]
 					unset kv_store["__data_file_content"]
 					if [[ $eval_exit_status -ne 0 ]]; then
+						unwrite_last_global_history
 						last_confirmation="Error: Writing back to remote storage failed."
 						continue
 					fi
@@ -2255,7 +2258,7 @@ main() {
 					echo "Key '__write' does not exist in kv_store."
 					last_confirmation="Error: No __write function defined for remote storage."
 					# NOTE: See note above
-					unwrite_global_history
+					unwrite_last_global_history
 					continue
 				fi
 
